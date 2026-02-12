@@ -38,7 +38,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CHROMA_DIR = DATA_DIR / "chroma_db"
 
 EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 512  # Matryoshka embeddings: 1536 → 512 dims (~3x smaller, negligible quality loss)
 BATCH_SIZE = 64  # OpenAI embedding batch size
 
 # Chunking configuration
@@ -679,7 +679,7 @@ def generate_embeddings(client: OpenAI, texts: list[str]) -> list[list[float]]:
         if batch and (batch_tokens + text_tokens > MAX_BATCH_TOKENS or len(batch) >= BATCH_SIZE):
             batch_num += 1
             print(f"  ⚡ Embedding batch {batch_num}/~{total_batches_est} ({len(batch)} texts, {batch_tokens} tokens)")
-            response = client.embeddings.create(input=batch, model=EMBEDDING_MODEL)
+            response = client.embeddings.create(input=batch, model=EMBEDDING_MODEL, dimensions=EMBEDDING_DIM)
             all_embeddings.extend([e.embedding for e in response.data])
             batch = []
             batch_tokens = 0
@@ -690,7 +690,7 @@ def generate_embeddings(client: OpenAI, texts: list[str]) -> list[list[float]]:
     if batch:
         batch_num += 1
         print(f"  ⚡ Embedding batch {batch_num}/~{total_batches_est} ({len(batch)} texts, {batch_tokens} tokens)")
-        response = client.embeddings.create(input=batch, model=EMBEDDING_MODEL)
+        response = client.embeddings.create(input=batch, model=EMBEDDING_MODEL, dimensions=EMBEDDING_DIM)
         all_embeddings.extend([e.embedding for e in response.data])
 
     return all_embeddings

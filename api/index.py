@@ -59,6 +59,7 @@ app.add_middleware(
 
 CHAT_MODEL = "gpt-4.1-mini"          # cheap, fast, good quality
 EMBEDDING_MODEL = "text-embedding-3-small"  # cheapest embedding model
+EMBEDDING_DIM = 512  # Matryoshka dims — must match ingestion
 
 # Retrieval configuration
 BM25_K1 = 1.2
@@ -141,10 +142,16 @@ def _load_data():
         with open(emb_meta_path) as f:
             emb_meta = json.load(f)
         stored_model = emb_meta.get("model", "unknown")
+        stored_dims = emb_meta.get("dimensions", "unknown")
         if stored_model != EMBEDDING_MODEL:
             logger.warning(
                 "Embedding model mismatch: stored=%s, configured=%s. "
                 "Re-run ingestion to update embeddings.", stored_model, EMBEDDING_MODEL
+            )
+        if stored_dims != EMBEDDING_DIM:
+            logger.warning(
+                "Embedding dimensions mismatch: stored=%s, configured=%s. "
+                "Re-run ingestion to update embeddings.", stored_dims, EMBEDDING_DIM
             )
     else:
         logger.info("No embeddings_meta.json found — embedding versioning not tracked")
@@ -404,7 +411,7 @@ def _extract_metadata_filters(query: str) -> dict[str, str | None]:
 def _get_embedding_cached(query: str) -> tuple[float, ...]:
     """Cache embedding results for identical queries (~3MB for 256 entries)."""
     client = get_openai()
-    resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
+    resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL, dimensions=EMBEDDING_DIM)
     return tuple(resp.data[0].embedding)
 
 
