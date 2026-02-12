@@ -113,11 +113,14 @@ def get_openai() -> OpenAI:
             status_code=503,
             detail="OpenAI API key not configured. Set OPENAI_API_KEY in environment variables.",
         )
-    _openai_client = OpenAI(
-        api_key=api_key,
-        timeout=30.0,
-        max_retries=3,
-    )
+    kwargs: dict = {"api_key": api_key, "timeout": 30.0, "max_retries": 3}
+    project_id = (os.environ.get("OPENAI_PROJECT_ID") or "").strip()
+    org_id = (os.environ.get("OPENAI_ORG_ID") or "").strip()
+    if project_id:
+        kwargs["project"] = project_id
+    if org_id:
+        kwargs["organization"] = org_id
+    _openai_client = OpenAI(**kwargs)
     return _openai_client
 
 
