@@ -30,6 +30,9 @@ frontend/out/
 # Screenshots (generated during development/testing)
 screenshots/
 
+# Playwright MCP
+.playwright-mcp/
+
 # OS
 .DS_Store
 Thumbs.db
