@@ -59,20 +59,31 @@ const MAX_THRESHOLD = 30;
 // Nodes with weight below this fraction of max get labels hidden (shown on hover)
 const LABEL_WEIGHT_FRACTION = 0.15;
 
+const ONBOARDING_KEY = 'genai-graph-onboarding-dismissed';
+
 export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return !localStorage.getItem(ONBOARDING_KEY);
+  });
   const [edgeThreshold, setEdgeThreshold] = useState(DEFAULT_EDGE_THRESHOLD);
+  const [visibleEdgeCount, setVisibleEdgeCount] = useState(0);
   const simulationRef = useRef<d3.Simulation<GraphNode, GraphEdge> | null>(null);
   const graphDataRef = useRef<GraphData | null>(null);
   const renderRef = useRef<((threshold: number) => void) | null>(null);
+  const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
 
   // Rebuild visible edges when threshold changes
   useEffect(() => {
     if (renderRef.current) {
       renderRef.current(edgeThreshold);
+    }
+    if (graphDataRef.current) {
+      setVisibleEdgeCount(graphDataRef.current.edges.filter(e => e.weight >= edgeThreshold).length);
     }
   }, [edgeThreshold]);
 
@@ -96,6 +107,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
         }
 
         graphDataRef.current = data;
+        setVisibleEdgeCount(data.edges.filter(e => e.weight >= DEFAULT_EDGE_THRESHOLD).length);
         setLoading(false);
         renderGraph(data);
       } catch (err) {
@@ -137,7 +149,8 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
         .on('zoom', (event) => {
           g.attr('transform', event.transform);
         });
-      svg.call(zoom);
+      svg.call(zoom as any);
+      zoomRef.current = zoom;
 
       // Scale node size by weight
       const maxWeight = d3.max(data.nodes, d => d.weight) || 1;
@@ -199,10 +212,19 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
         .data(data.nodes)
         .join('g')
         .attr('class', 'graph-node')
+        .attr('tabindex', '0')
+        .attr('role', 'button')
+        .attr('aria-label', d => `${d.label} (${d.category}, ${d.weight} references)`)
         .style('cursor', 'pointer')
         .on('click', (event, d) => {
           event.stopPropagation();
           onTopicClickRef.current(d.id);
+        })
+        .on('keydown', (event, d) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onTopicClickRef.current(d.id);
+          }
         })
         .call(d3.drag<SVGGElement, GraphNode>()
           .on('start', (event, d) => {
@@ -218,7 +240,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
             if (!event.active) simulation.alphaTarget(0);
             d.fx = null;
             d.fy = null;
-          })
+          }) as any
         );
 
       // Node circles
@@ -235,7 +257,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
         .attr('class', 'graph-label')
         .attr('dy', d => nodeScale(d.weight) + 14)
         .text(d => d.label)
-        .style('font-size', d => d.weight > maxWeight * 0.5 ? '12px' : '10px')
+        .style('font-size', d => d.weight > maxWeight * 0.5 ? '14px' : '12px')
         .style('fill', d => d.weight > maxWeight * 0.3 ? '#e2e8f0' : '#94a3b8')
         .style('opacity', d => d.weight >= labelThreshold ? 1 : 0);
 
@@ -309,7 +331,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
         const cx = (xExtent[0] + xExtent[1]) / 2;
         const cy = (yExtent[0] + yExtent[1]) / 2;
 
-        svg.transition().duration(600).call(
+        (svg.transition().duration(600) as any).call(
           zoom.transform,
           d3.zoomIdentity
             .translate(width / 2, height / 2)
@@ -323,7 +345,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
     return () => { cancelled = true; simulationRef.current?.stop(); };
   }, []);
 
-  // Highlight selected topic
+  // Highlight selected topic and auto-zoom to it
   useEffect(() => {
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
@@ -332,11 +354,24 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
       .attr('stroke', (d: any) =>
         d.id === selectedTopic ? '#ffffff' : (CATEGORY_COLORS[d.category] || '#8b5cf6')
       );
-  }, [selectedTopic]);
 
-  const visibleEdgeCount = graphDataRef.current
-    ? graphDataRef.current.edges.filter(e => e.weight >= edgeThreshold).length
-    : 0;
+    // Auto-zoom to selected node
+    if (selectedTopic && graphDataRef.current && zoomRef.current && containerRef.current) {
+      const node = graphDataRef.current.nodes.find(n => n.id === selectedTopic);
+      if (node && node.x != null && node.y != null) {
+        const width = containerRef.current.clientWidth;
+        const height = containerRef.current.clientHeight;
+        const scale = 1.5;
+        (svg.transition().duration(500) as any).call(
+          zoomRef.current.transform,
+          d3.zoomIdentity
+            .translate(width / 2, height / 2)
+            .scale(scale)
+            .translate(-node.x, -node.y)
+        );
+      }
+    }
+  }, [selectedTopic]);
 
   return (
     <div ref={containerRef} className="w-full h-full graph-container relative bg-[var(--midnight)]">
@@ -362,7 +397,28 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
           </div>
         </div>
       )}
-      <svg ref={svgRef} className="w-full h-full" />
+      <svg ref={svgRef} className="w-full h-full" role="img" aria-label="Knowledge graph showing GenAI topics and their connections" />
+
+      {/* Onboarding hint */}
+      {!loading && !error && showOnboarding && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 animate-fade-in">
+          <div className="flex items-center gap-3 bg-[var(--abyss)]/90 backdrop-blur-sm rounded-lg px-4 py-2.5 border border-violet-500/30 shadow-lg">
+            <span className="text-xs text-[var(--text-secondary)]">
+              Scroll to zoom, drag to pan, click a node to explore
+            </span>
+            <button
+              onClick={() => {
+                setShowOnboarding(false);
+                localStorage.setItem(ONBOARDING_KEY, '1');
+              }}
+              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+              aria-label="Dismiss hint"
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Controls: Legend + Edge threshold slider */}
       {!loading && !error && (
@@ -372,15 +428,14 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
             {Object.entries(CATEGORY_COLORS).map(([cat, color]) => (
               <div key={cat} className="flex items-center gap-1.5">
                 <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
-                <span className="text-[10px] text-[var(--text-muted)] capitalize">{cat}</span>
+                <span className="text-xs text-[var(--text-muted)] capitalize">{cat}</span>
               </div>
             ))}
-            <span className="text-[10px] text-[var(--text-muted)] ml-2">Scroll to zoom · Drag to pan</span>
           </div>
 
           {/* Edge threshold slider */}
           <div className="absolute bottom-4 right-4 flex items-center gap-3 bg-[var(--abyss)]/80 backdrop-blur-sm rounded-lg px-4 py-2 border border-[var(--border)]">
-            <span className="text-[10px] text-[var(--text-muted)] whitespace-nowrap">Connections</span>
+            <span className="text-xs text-[var(--text-muted)] whitespace-nowrap">Connections</span>
             <input
               type="range"
               min={MIN_THRESHOLD}
@@ -389,7 +444,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
               onChange={(e) => setEdgeThreshold(Number(e.target.value))}
               className="w-20 h-1 accent-violet-500 cursor-pointer"
             />
-            <span className="text-[10px] text-[var(--text-secondary)] tabular-nums w-6 text-right">
+            <span className="text-xs text-[var(--text-secondary)] tabular-nums w-6 text-right">
               {visibleEdgeCount}
             </span>
           </div>

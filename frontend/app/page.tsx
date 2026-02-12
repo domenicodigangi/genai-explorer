@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import Chat from '@/components/Chat';
 import TopicGraph from '@/components/TopicGraph';
 import TopicTree from '@/components/TopicTree';
@@ -24,11 +24,20 @@ export default function Home() {
     setTab('chat');
   }, []);
 
+  // Escape key closes detail panel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedTopic(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       {/* ---- Header ---- */}
       <header className="flex-shrink-0 border-b border-[var(--border)] bg-[var(--abyss)]">
-        <div className="flex items-center justify-between px-6 py-3">
+        <div className="flex items-center justify-between flex-wrap gap-3 px-6 py-3">
           {/* Logo */}
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center">
@@ -136,7 +145,7 @@ export default function Home() {
                   Topic Treemap
                 </button>
                 <div className="flex-1" />
-                <span className="text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                <span className="text-xs text-[var(--text-muted)] tracking-wider uppercase">
                   Click a topic to explore
                 </span>
               </div>
@@ -158,6 +167,7 @@ export default function Home() {
                 topicId={selectedTopic}
                 onClose={() => setSelectedTopic(null)}
                 onExploreInChat={handleExploreInChat}
+                onTopicSelect={handleTopicClick}
               />
             )}
           </div>

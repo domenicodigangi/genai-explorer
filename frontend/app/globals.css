@@ -13,7 +13,7 @@
   --border-bright: #334155;
   --text-primary: #e2e8f0;
   --text-secondary: #94a3b8;
-  --text-muted: #64748b;
+  --text-muted: #7e8fa6;
   --nebula: #8b5cf6;
   --nebula-glow: rgba(139, 92, 246, 0.3);
   --aurora: #10b981;
@@ -32,11 +32,22 @@
 
 html, body {
   height: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--midnight);
   color: var(--text-primary);
   font-family: 'DM Sans', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+}
+
+.font-display {
+  font-family: 'Instrument Serif', Georgia, serif;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--nebula);
+  outline-offset: 2px;
 }
 
 /* Scrollbar styling */
@@ -74,6 +85,11 @@ body::before {
 @keyframes slideUp {
   from { opacity: 0; transform: translateY(20px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
 @keyframes pulse-glow {
@@ -125,7 +141,7 @@ body::before {
 
 .graph-label {
   font-family: 'DM Sans', sans-serif;
-  font-size: 11px;
+  font-size: 12px;
   fill: var(--text-secondary);
   pointer-events: none;
   text-anchor: middle;
@@ -175,7 +191,7 @@ body::before {
 /* ---- Topic Detail Panel ---- */
 
 .detail-panel {
-  animation: slideUp 0.3s ease-out;
+  animation: slideInRight 0.3s ease-out;
   background: var(--surface);
   border-left: 1px solid var(--border);
 }
@@ -263,4 +279,22 @@ body::before {
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 0.9em;
+}
+
+/* ---- Reduced Motion ---- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---- Mobile Responsive ---- */
+@media (max-width: 640px) {
+  .detail-panel {
+    width: 100% !important;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
 }

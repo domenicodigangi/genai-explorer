@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import * as d3 from 'd3';
 
 interface Props {
@@ -33,6 +33,9 @@ export default function TopicTree({ onTopicClick }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const renderTreemapRef = useRef<((hierarchy: TreeNode) => void) | null>(null);
+  const hierarchyDataRef = useRef<TreeNode | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,6 +54,8 @@ export default function TopicTree({ onTopicClick }: Props) {
           return;
         }
 
+        hierarchyDataRef.current = hierarchy;
+        renderTreemapRef.current = renderTreemap;
         setLoading(false);
         renderTreemap(hierarchy);
       } catch {
@@ -78,7 +83,7 @@ export default function TopicTree({ onTopicClick }: Props) {
         .sum(d => d.value || 1)
         .sort((a, b) => (b.value || 0) - (a.value || 0));
 
-      d3.treemap<TreeNode>()
+      const treemapRoot = d3.treemap<TreeNode>()
         .size([width, height])
         .paddingOuter(6)
         .paddingInner(3)
@@ -97,7 +102,7 @@ export default function TopicTree({ onTopicClick }: Props) {
 
       // Draw category groups (depth 1)
       const groups = svg.selectAll('g.category')
-        .data(root.children || [])
+        .data(treemapRoot.children || [])
         .join('g')
         .attr('class', 'category');
 
@@ -129,7 +134,7 @@ export default function TopicTree({ onTopicClick }: Props) {
 
       // Draw leaf nodes (depth 2)
       const leaves = svg.selectAll('g.leaf')
-        .data(root.leaves())
+        .data(treemapRoot.leaves())
         .join('g')
         .attr('class', 'leaf tree-node')
         .style('cursor', 'pointer')
@@ -138,6 +143,12 @@ export default function TopicTree({ onTopicClick }: Props) {
         })
         .on('mouseenter', (event, d) => {
           setHoveredNode(d.data.name);
+          const rect = container!.getBoundingClientRect();
+          setMousePos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+        })
+        .on('mousemove', (event) => {
+          const rect = container!.getBoundingClientRect();
+          setMousePos({ x: event.clientX - rect.left, y: event.clientY - rect.top });
         })
         .on('mouseleave', () => {
           setHoveredNode(null);
@@ -209,6 +220,19 @@ export default function TopicTree({ onTopicClick }: Props) {
     return () => { cancelled = true; };
   }, [onTopicClick]);
 
+  // Re-render on container resize
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(() => {
+      if (renderTreemapRef.current && hierarchyDataRef.current) {
+        renderTreemapRef.current(hierarchyDataRef.current);
+      }
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div ref={containerRef} className="w-full h-full relative bg-[var(--midnight)]">
       {loading && (
@@ -232,7 +256,10 @@ export default function TopicTree({ onTopicClick }: Props) {
 
       {/* Tooltip */}
       {hoveredNode && (
-        <div className="absolute top-4 right-4 bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 text-xs text-[var(--text-secondary)] pointer-events-none animate-fade-in">
+        <div
+          className="absolute bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 text-xs text-[var(--text-secondary)] pointer-events-none z-10 shadow-lg"
+          style={{ left: mousePos.x + 12, top: mousePos.y - 8 }}
+        >
           {hoveredNode}
         </div>
       )}

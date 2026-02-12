@@ -9,6 +9,7 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   sources?: Source[];
+  isError?: boolean;
 }
 
 interface Source {
@@ -91,6 +92,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
         {
           role: 'assistant',
           content: 'Sorry, I encountered an error connecting to the API. Please make sure the backend is running.',
+          isError: true,
         },
       ]);
     } finally {
@@ -130,7 +132,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
       {/* Messages area */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full animate-fade-in">
+          <div className="flex flex-col items-start justify-center h-full animate-fade-in max-w-2xl mx-auto w-full">
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500/20 to-cyan-500/20 border border-violet-500/20 flex items-center justify-center mb-6">
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--nebula)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3"/>
@@ -140,16 +142,16 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
             <h2 className="font-display text-2xl text-[var(--text-primary)] mb-2">
               Ask anything about GenAI
             </h2>
-            <p className="text-sm text-[var(--text-muted)] mb-8 text-center max-w-md">
+            <p className="text-sm text-[var(--text-muted)] mb-8 max-w-md">
               I can help you navigate 90+ courses, research papers, roadmaps, and interview prep materials
               from the awesome-generative-ai-guide collection.
             </p>
-            <div className="grid grid-cols-2 gap-2 w-full max-w-lg">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg">
               {SUGGESTIONS.map((s, i) => (
                 <button
                   key={i}
                   onClick={() => sendMessage(s)}
-                  className="text-left text-xs text-[var(--text-secondary)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] border border-[var(--border)] rounded-lg px-3 py-2.5 transition-all hover:border-violet-500/30"
+                  className="text-left text-xs text-[var(--text-secondary)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] border border-[var(--border)] rounded-lg px-3 py-3 min-h-[44px] transition-all hover:border-violet-500/30"
                 >
                   {s}
                 </button>
@@ -161,9 +163,9 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
         {messages.map((msg, i) => (
           <div key={i} className={`chat-message ${msg.role} rounded-xl px-5 py-4 max-w-3xl ${
             msg.role === 'user' ? 'ml-auto max-w-xl' : ''
-          }`}>
+          } ${msg.isError ? 'border-l-2 !border-l-rose-500/50 !bg-rose-500/5' : ''}`}>
             {/* Role label */}
-            <div className={`text-[10px] uppercase tracking-wider font-medium mb-2 ${
+            <div className={`text-xs uppercase tracking-wider font-medium mb-2 ${
               msg.role === 'user' ? 'text-[var(--text-muted)]' : 'text-violet-400'
             }`}>
               {msg.role === 'user' ? 'You' : 'Explorer'}
@@ -186,7 +188,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
             {/* Sources */}
             {msg.sources && msg.sources.length > 0 && (
               <div className="mt-4 pt-3 border-t border-[var(--border)]">
-                <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-2">
+                <div className="text-xs uppercase tracking-wider text-[var(--text-muted)] mb-2">
                   Sources
                 </div>
                 <div className="space-y-2">
@@ -222,7 +224,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                             href={source.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 transition-colors text-[10px] font-medium"
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 transition-colors text-xs font-medium"
                           >
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
@@ -238,7 +240,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                             href={source.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors text-[10px] font-medium"
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors text-xs font-medium"
                           >
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
@@ -250,11 +252,11 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                         )}
                         {/* Additional URLs for papers */}
                         {source.all_urls && source.all_urls.length > 1 && (
-                          <span className="text-[10px] text-[var(--text-muted)]">
+                          <span className="text-xs text-[var(--text-muted)]">
                             +{source.all_urls.length - 1} links
                           </span>
                         )}
-                        <span className="text-[10px] text-[var(--text-muted)]">
+                        <span className="text-xs text-[var(--text-muted)]">
                           {(source.score * 100).toFixed(0)}%
                         </span>
                       </span>
@@ -269,7 +271,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
         {/* Loading indicator */}
         {isLoading && (
           <div className="chat-message assistant rounded-xl px-5 py-4">
-            <div className="text-[10px] uppercase tracking-wider font-medium mb-2 text-violet-400">
+            <div className="text-xs uppercase tracking-wider font-medium mb-2 text-violet-400">
               Explorer
             </div>
             <div className="flex items-center gap-2">
@@ -291,6 +293,11 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onInput={(e) => {
+              const el = e.currentTarget;
+              el.style.height = 'auto';
+              el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+            }}
             onKeyDown={handleKeyDown}
             placeholder="Ask about GenAI courses, techniques, research..."
             rows={1}
@@ -307,7 +314,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
             </svg>
           </button>
         </div>
-        <p className="text-[10px] text-[var(--text-muted)] text-center mt-2">
+        <p className="text-xs text-[var(--text-muted)] text-center mt-2">
           Powered by RAG over awesome-generative-ai-guide · OpenAI gpt-4.1-mini · Responses may contain inaccuracies
         </p>
       </div>

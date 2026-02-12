@@ -47,6 +47,7 @@ interface Props {
   topicId: string;
   onClose: () => void;
   onExploreInChat: (topicLabel: string) => void;
+  onTopicSelect: (topicId: string) => void;
 }
 
 const CATEGORY_BADGES: Record<string, { bg: string; text: string; label: string }> = {
@@ -70,7 +71,7 @@ const FILE_CATEGORY_LABELS: Record<string, string> = {
   research_updates: 'Research',
 };
 
-export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props) {
+export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopicSelect }: Props) {
   const [data, setData] = useState<TopicData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -96,7 +97,7 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
   const badge = data ? CATEGORY_BADGES[data.topic.category] || CATEGORY_BADGES.concept : null;
 
   return (
-    <div className="detail-panel w-[380px] h-full overflow-y-auto flex-shrink-0">
+    <div className="detail-panel w-full sm:w-[380px] h-full overflow-y-auto flex-shrink-0">
       {/* Header */}
       <div className="sticky top-0 bg-[var(--surface)] border-b border-[var(--border)] px-5 py-4 z-10">
         <div className="flex items-start justify-between">
@@ -110,11 +111,11 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
                 </h3>
                 <div className="flex items-center gap-2 mt-1">
                   {badge && (
-                    <span className={`${badge.bg} ${badge.text} text-[10px] font-medium px-2 py-0.5 rounded-full uppercase tracking-wider`}>
+                    <span className={`${badge.bg} ${badge.text} text-xs font-medium px-2 py-0.5 rounded-full uppercase tracking-wider`}>
                       {badge.label}
                     </span>
                   )}
-                  <span className="text-[10px] text-[var(--text-muted)]">
+                  <span className="text-xs text-[var(--text-muted)]">
                     {data.topic.weight} references
                   </span>
                 </div>
@@ -125,6 +126,7 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
           </div>
           <button
             onClick={onClose}
+            aria-label="Close detail panel"
             className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -163,19 +165,14 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
           {/* Connected Topics */}
           {data.connected_topics.length > 0 && (
             <div>
-              <h4 className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium mb-3">
+              <h4 className="text-xs uppercase tracking-wider text-[var(--text-muted)] font-medium mb-3">
                 Connected Topics
               </h4>
               <div className="flex flex-wrap gap-1.5">
                 {data.connected_topics.map(ct => (
                   <button
                     key={ct.id}
-                    onClick={() => {
-                      // This would navigate to the topic in the graph
-                      // For now, we re-select
-                      const event = new CustomEvent('selectTopic', { detail: ct.id });
-                      window.dispatchEvent(event);
-                    }}
+                    onClick={() => onTopicSelect(ct.id)}
                     className="text-[11px] px-2.5 py-1 rounded-full bg-[var(--midnight)] border border-[var(--border)] text-[var(--text-secondary)] hover:border-violet-500/40 hover:text-violet-300 transition-all"
                   >
                     {ct.label}
@@ -189,7 +186,7 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
           {/* Resources */}
           {data.resources.length > 0 && (
             <div>
-              <h4 className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium mb-3">
+              <h4 className="text-xs uppercase tracking-wider text-[var(--text-muted)] font-medium mb-3">
                 Resources ({data.resources.length})
               </h4>
               <div className="space-y-2">
@@ -199,7 +196,7 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
                     className="rounded-lg bg-[var(--midnight)] border border-[var(--border)] p-3 hover:border-[var(--border-bright)] transition-colors"
                   >
                     <div className="flex items-center gap-2 mb-1.5">
-                      <span className={`text-[10px] font-medium ${
+                      <span className={`text-xs font-medium ${
                         resource.content_type === 'paper'
                           ? 'text-rose-400'
                           : FILE_CATEGORY_COLORS[resource.category] || 'text-slate-400'
@@ -238,27 +235,10 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
                         </ReactMarkdown>
                       </div>
                     )}
-                    {/* Action row: file path + paper link */}
-                    <div className="flex items-center justify-between mt-2">
-                      <p className="text-[10px] text-[var(--text-muted)] font-mono truncate flex-1">
-                        {resource.source_file}
-                      </p>
-                      {resource.content_type === 'paper' && resource.url && (
-                        <a
-                          href={resource.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex-shrink-0 ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 transition-colors text-[10px] font-medium"
-                        >
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                            <polyline points="15 3 21 3 21 9"/>
-                            <line x1="10" y1="14" x2="21" y2="3"/>
-                          </svg>
-                          Read Paper
-                        </a>
-                      )}
-                    </div>
+                    {/* File path */}
+                    <p className="text-xs text-[var(--text-muted)] font-mono truncate mt-2">
+                      {resource.source_file}
+                    </p>
                     {/* Additional links */}
                     {resource.all_urls && resource.all_urls.length > 1 && (
                       <div className="flex flex-wrap gap-1.5 mt-1.5">
@@ -271,7 +251,7 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
                               href={u}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-[10px] text-violet-300 hover:bg-violet-500/20 transition-colors truncate max-w-[200px]"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-xs text-violet-300 hover:bg-violet-500/20 transition-colors truncate max-w-[200px]"
                             >
                               <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
