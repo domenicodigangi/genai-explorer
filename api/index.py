@@ -223,8 +223,8 @@ def health(debug: str = Query("", alias="debug_secret")):
         "api_key_set": has_key,
     }
     # Gate expensive OpenAI probe behind DEBUG_SECRET env var
-    expected_secret = os.environ.get("DEBUG_SECRET", "")
-    if expected_secret and debug == expected_secret and has_key:
+    expected_secret = os.environ.get("DEBUG_SECRET")
+    if expected_secret and debug and debug == expected_secret and has_key:
         try:
             client = get_openai()
             emb = client.embeddings.create(input=["health check"], model=EMBEDDING_MODEL)
