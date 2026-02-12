@@ -30,12 +30,12 @@ interface ChatProps {
 }
 
 const SUGGESTIONS = [
-  'What are the best free courses to learn about RAG?',
-  'Explain the difference between fine-tuning and RLHF',
-  'What agent frameworks are covered in the resources?',
-  'Give me a 5-day roadmap to learn LLM foundations',
-  'What evaluation techniques are recommended for LLMs?',
-  'Which courses cover multimodal AI models?',
+  'How does RAG work, and what retrieval strategies are compared in the resources?',
+  'What are the key approaches to evaluating LLM outputs — metrics, benchmarks, and best practices?',
+  'Explain LoRA and QLoRA — how do parameter-efficient fine-tuning methods work?',
+  'What types of AI agents are described, and how do they use tools and planning?',
+  'What are the main safety and alignment challenges for LLMs, and how does RLHF address them?',
+  'How do multimodal models like GPT-4V and Gemini combine vision and language capabilities?',
 ];
 
 const MAX_SESSION_MESSAGES = 50;
@@ -83,7 +83,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
     if (userMessageCount >= MAX_SESSION_MESSAGES) {
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: 'You\'ve reached the message limit for this session. Please reload the page to continue.',
+        content: 'You\'ve reached the message limit for this session. Click "New Chat" above to start a new conversation.',
         isError: true,
       }]);
       return;
@@ -132,6 +132,15 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
     }
   }, [input, isLoading, cooldown, messages, userMessageCount]);
 
+  const resetChat = useCallback(() => {
+    setMessages([]);
+    setInput('');
+    setIsLoading(false);
+    setCooldown(false);
+    if (cooldownRef.current) clearTimeout(cooldownRef.current);
+    setTimeout(() => inputRef.current?.focus(), 100);
+  }, []);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -163,6 +172,20 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
     <div className="h-full flex flex-col max-w-4xl mx-auto">
       {/* Messages area */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
+        {messages.length > 0 && (
+          <div className="sticky top-0 z-10 flex justify-end pb-2">
+            <button
+              onClick={resetChat}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface)] border border-transparent hover:border-[var(--border)] transition-all"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              New Chat
+            </button>
+          </div>
+        )}
         {messages.length === 0 && (
           <div className="flex flex-col items-start justify-center h-full animate-fade-in max-w-2xl mx-auto w-full">
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500/20 to-cyan-500/20 border border-violet-500/20 flex items-center justify-center mb-6">
