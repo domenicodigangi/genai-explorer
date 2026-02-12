@@ -144,6 +144,7 @@ EXCLUDED_FILES = [
     'go.sum',
     'uv.lock',
     '.gitignore',
+    'tsconfig.tsbuildinfo',
 ]
 
 # Directories to exclude
@@ -158,6 +159,7 @@ EXCLUDED_DIRS = [
     '.pytest_cache/',
     'venv/',
     'env/',
+    'data/',
 ]
 
 def should_skip_file(file_path):
