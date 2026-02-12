@@ -151,8 +151,8 @@ def search_similar(query: str, top_k: int = 8) -> list[dict]:
     client = get_openai()
     try:
         resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
-    except OpenAIError:
-        raise HTTPException(status_code=502, detail="Embedding service temporarily unavailable")
+    except OpenAIError as e:
+        raise HTTPException(status_code=502, detail=f"Embedding service error: {str(e)[:500]}")
     query_emb = np.array(resp.data[0].embedding, dtype=np.float32)
 
     if len(_store["emb_ids"]) == 0:
