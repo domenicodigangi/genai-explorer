@@ -12,7 +12,10 @@ LLM: OpenAI gpt-4.1-mini (chat) + text-embedding-3-small (embeddings)
 
 import hashlib
 import json
+import logging
+import math
 import os
+import re
 import time
 from collections import defaultdict
 from functools import lru_cache
@@ -22,10 +25,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import numpy as np
+import tiktoken
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from openai import OpenAI, OpenAIError
+
+logger = logging.getLogger("genai_explorer")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -51,6 +59,34 @@ app.add_middleware(
 
 CHAT_MODEL = "gpt-4.1-mini"          # cheap, fast, good quality
 EMBEDDING_MODEL = "text-embedding-3-small"  # cheapest embedding model
+
+# Retrieval configuration
+BM25_K1 = 1.2
+BM25_B = 0.75
+HYBRID_ALPHA = 0.7         # weight for semantic vs BM25 (1.0 = pure semantic)
+MIN_SIMILARITY_THRESHOLD = 0.25
+RETRIEVAL_TOP_K_INITIAL = 20   # initial candidate set for reranking
+RETRIEVAL_TOP_K_FINAL_MIN = 3
+RETRIEVAL_TOP_K_FINAL_MAX = 8
+CONTEXT_TOKEN_BUDGET = 6000    # max tokens for assembled context
+MAX_CHARS_PER_SOURCE = 2000    # raised from 1500 to reduce truncation
+
+# Token counting (approximate for gpt-4.1-mini)
+_tokenizer: tiktoken.Encoding | None = None
+
+
+def _get_tokenizer() -> tiktoken.Encoding:
+    global _tokenizer
+    if _tokenizer is None:
+        try:
+            _tokenizer = tiktoken.encoding_for_model("gpt-4o")  # closest available
+        except Exception:
+            _tokenizer = tiktoken.get_encoding("cl100k_base")
+    return _tokenizer
+
+
+def _count_tokens(text: str) -> int:
+    return len(_get_tokenizer().encode(text))
 
 # ---------------------------------------------------------------------------
 # Data loading — lazy singleton
@@ -96,9 +132,119 @@ def _load_data():
         _store["emb_ids"] = []
         _store["emb_matrix_norm"] = np.array([])
 
-    print(f"📦 Loaded {len(_store['chunks'])} chunks, "
-          f"{len(_store['graph']['nodes'])} topic nodes, "
-          f"{len(_store['emb_ids'])} embeddings")
+    # Build BM25 index from chunk texts
+    _build_bm25_index()
+
+    # Embedding versioning check
+    emb_meta_path = DATA_DIR / "embeddings_meta.json"
+    if emb_meta_path.exists():
+        with open(emb_meta_path) as f:
+            emb_meta = json.load(f)
+        stored_model = emb_meta.get("model", "unknown")
+        if stored_model != EMBEDDING_MODEL:
+            logger.warning(
+                "Embedding model mismatch: stored=%s, configured=%s. "
+                "Re-run ingestion to update embeddings.", stored_model, EMBEDDING_MODEL
+            )
+    else:
+        logger.info("No embeddings_meta.json found — embedding versioning not tracked")
+
+    logger.info(
+        "Loaded %d chunks, %d topic nodes, %d embeddings",
+        len(_store['chunks']), len(_store['graph']['nodes']), len(_store['emb_ids'])
+    )
+
+
+# ---------------------------------------------------------------------------
+# BM25 sparse retrieval
+# ---------------------------------------------------------------------------
+
+_BM25_WORD_RE = re.compile(r'\b[a-zA-Z0-9][\w-]*\b')
+
+
+def _tokenize_bm25(text: str) -> list[str]:
+    """Simple whitespace + punctuation tokenizer for BM25."""
+    return [w.lower() for w in _BM25_WORD_RE.findall(text)]
+
+
+def _build_bm25_index():
+    """Build in-memory BM25 index from loaded chunks."""
+    chunks = _store.get("chunks", {})
+    if not chunks:
+        _store["bm25_ready"] = False
+        return
+
+    doc_ids = list(chunks.keys())
+    doc_freqs: dict[str, int] = {}  # term -> number of docs containing term
+    doc_term_freqs: list[dict[str, int]] = []  # per-doc term frequencies
+    doc_lengths: list[int] = []
+    total_length = 0
+
+    for cid in doc_ids:
+        text = chunks[cid].get("text", "")
+        tokens = _tokenize_bm25(text)
+        doc_lengths.append(len(tokens))
+        total_length += len(tokens)
+
+        tf: dict[str, int] = {}
+        for t in tokens:
+            tf[t] = tf.get(t, 0) + 1
+        doc_term_freqs.append(tf)
+
+        for term in tf:
+            doc_freqs[term] = doc_freqs.get(term, 0) + 1
+
+    n_docs = len(doc_ids)
+    avg_dl = total_length / n_docs if n_docs else 1
+
+    # Precompute IDF values
+    idf: dict[str, float] = {}
+    for term, df in doc_freqs.items():
+        idf[term] = math.log((n_docs - df + 0.5) / (df + 0.5) + 1)
+
+    _store["bm25"] = {
+        "doc_ids": doc_ids,
+        "idf": idf,
+        "doc_term_freqs": doc_term_freqs,
+        "doc_lengths": doc_lengths,
+        "avg_dl": avg_dl,
+        "n_docs": n_docs,
+    }
+    _store["bm25_ready"] = True
+    logger.info("BM25 index built: %d documents, %d unique terms", n_docs, len(idf))
+
+
+def _bm25_search(query: str, top_k: int = 20) -> list[tuple[str, float]]:
+    """Score documents against query using BM25. Returns [(chunk_id, score), ...]."""
+    if not _store.get("bm25_ready"):
+        return []
+
+    bm25 = _store["bm25"]
+    query_tokens = _tokenize_bm25(query)
+    if not query_tokens:
+        return []
+
+    scores = np.zeros(bm25["n_docs"], dtype=np.float64)
+    for term in query_tokens:
+        if term not in bm25["idf"]:
+            continue
+        idf_val = bm25["idf"][term]
+        for i, tf_dict in enumerate(bm25["doc_term_freqs"]):
+            if term in tf_dict:
+                tf = tf_dict[term]
+                dl = bm25["doc_lengths"][i]
+                numerator = tf * (BM25_K1 + 1)
+                denominator = tf + BM25_K1 * (1 - BM25_B + BM25_B * dl / bm25["avg_dl"])
+                scores[i] += idf_val * numerator / denominator
+
+    top_indices = np.argpartition(-scores, min(top_k, len(scores) - 1))[:top_k]
+    top_indices = top_indices[np.argsort(-scores[top_indices])]
+
+    results = []
+    for idx in top_indices:
+        if scores[idx] > 0:
+            results.append((bm25["doc_ids"][idx], float(scores[idx])))
+    return results
 
 
 _openai_client: OpenAI | None = None
@@ -186,7 +332,72 @@ def _set_chat_cache(key: str, answer: str, sources: list[dict]):
 
 
 # ---------------------------------------------------------------------------
-# Similarity search
+# Query rewriting — resolve conversational references using history
+# ---------------------------------------------------------------------------
+
+def _rewrite_query(message: str, history: list) -> str:
+    """Rewrite a conversational query into a standalone search query using history context."""
+    if not history:
+        return message
+
+    # Only rewrite if the query seems to reference prior context
+    reference_patterns = r'\b(it|that|this|those|these|they|them|the same|above|previous|mentioned|said)\b'
+    if not re.search(reference_patterns, message, re.IGNORECASE) and len(message.split()) > 4:
+        return message
+
+    try:
+        client = get_openai()
+        history_text = "\n".join(
+            f"{m.role}: {m.content[:200]}" for m in history[-4:]
+        )
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{
+                "role": "system",
+                "content": "Rewrite the user's latest message as a standalone search query that "
+                           "includes necessary context from the conversation history. "
+                           "Output ONLY the rewritten query, nothing else. "
+                           "If the message is already standalone, return it unchanged."
+            }, {
+                "role": "user",
+                "content": f"Conversation history:\n{history_text}\n\nLatest message: {message}"
+            }],
+            temperature=0,
+            max_tokens=150,
+        )
+        rewritten = resp.choices[0].message.content.strip()
+        if rewritten and len(rewritten) < 500:
+            logger.info("Query rewritten: '%s' -> '%s'", message[:80], rewritten[:80])
+            return rewritten
+    except Exception as e:
+        logger.warning("Query rewriting failed, using original: %s", str(e)[:200])
+
+    return message
+
+
+# ---------------------------------------------------------------------------
+# Metadata filtering — extract intent from query
+# ---------------------------------------------------------------------------
+
+_CONTENT_TYPE_PATTERNS = {
+    "paper": re.compile(r'\b(paper|papers|research|study|studies|arxiv|publication)\b', re.I),
+    "course": re.compile(r'\b(course|courses|tutorial|tutorials|lesson|lessons|learn|training)\b', re.I),
+    "interview": re.compile(r'\b(interview|interviews|prep|preparation|hiring|questions)\b', re.I),
+}
+
+
+def _extract_metadata_filters(query: str) -> dict[str, str | None]:
+    """Extract metadata filters from query intent."""
+    filters: dict[str, str | None] = {"content_type": None}
+    for content_type, pattern in _CONTENT_TYPE_PATTERNS.items():
+        if pattern.search(query):
+            filters["content_type"] = content_type
+            break
+    return filters
+
+
+# ---------------------------------------------------------------------------
+# Similarity search — hybrid (semantic + BM25), threshold, reranking
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=256)
@@ -197,10 +408,42 @@ def _get_embedding_cached(query: str) -> tuple[float, ...]:
     return tuple(resp.data[0].embedding)
 
 
-def search_similar(query: str, top_k: int = 8) -> list[dict]:
-    """Search for similar chunks via cosine similarity on pre-computed embeddings."""
-    _load_data()
+def _deduplicate_results(results: list[dict]) -> list[dict]:
+    """Remove near-duplicate chunks from the same source/section."""
+    seen: set[str] = set()
+    deduped = []
+    for r in results:
+        # Key on source_file + section to detect adjacent chunks
+        dedup_key = f"{r.get('source_file', '')}::{r.get('section', '')}"
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        deduped.append(r)
+    return deduped
 
+
+def _truncate_at_sentence(text: str, max_chars: int) -> str:
+    """Truncate text at the last sentence boundary before max_chars."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    # Find last sentence-ending punctuation
+    last_period = max(truncated.rfind('. '), truncated.rfind('.\n'),
+                      truncated.rfind('? '), truncated.rfind('! '))
+    if last_period > max_chars * 0.5:  # only use if we keep at least half
+        return truncated[:last_period + 1]
+    return truncated.rstrip()
+
+
+def search_similar(query: str, top_k: int = 8, metadata_filters: dict | None = None) -> list[dict]:
+    """
+    Hybrid search: combine semantic (cosine) + BM25 (keyword) scores.
+    Apply similarity threshold, metadata filtering, and deduplication.
+    """
+    _load_data()
+    t0 = time.time()
+
+    # --- Semantic search (large candidate set) ---
     try:
         emb_tuple = _get_embedding_cached(query)
     except OpenAIError as e:
@@ -211,18 +454,58 @@ def search_similar(query: str, top_k: int = 8) -> list[dict]:
         return []
 
     query_norm = query_emb / (np.linalg.norm(query_emb) or 1)
-    scores = _store["emb_matrix_norm"] @ query_norm
-    top_indices = np.argpartition(-scores, top_k)[:top_k]
-    top_indices = top_indices[np.argsort(-scores[top_indices])]
+    semantic_scores = _store["emb_matrix_norm"] @ query_norm
 
+    # Build ID-to-index map for merging
+    id_to_idx = {cid: i for i, cid in enumerate(_store["emb_ids"])}
+
+    # --- BM25 search ---
+    bm25_results = _bm25_search(query, top_k=RETRIEVAL_TOP_K_INITIAL)
+    bm25_scores_map: dict[str, float] = {}
+    if bm25_results:
+        max_bm25 = max(s for _, s in bm25_results) or 1.0
+        bm25_scores_map = {cid: score / max_bm25 for cid, score in bm25_results}
+
+    # --- Hybrid fusion: combine scores ---
+    # Normalize semantic scores to [0, 1] range for fusion
+    sem_min, sem_max = float(semantic_scores.min()), float(semantic_scores.max())
+    sem_range = sem_max - sem_min if sem_max > sem_min else 1.0
+
+    combined_scores: dict[str, float] = {}
+    # Start with all embedding IDs
+    for i, cid in enumerate(_store["emb_ids"]):
+        sem_norm = (float(semantic_scores[i]) - sem_min) / sem_range
+        bm25_norm = bm25_scores_map.get(cid, 0.0)
+        combined_scores[cid] = HYBRID_ALPHA * sem_norm + (1 - HYBRID_ALPHA) * bm25_norm
+
+    # Sort by combined score
+    ranked_ids = sorted(combined_scores, key=combined_scores.get, reverse=True)
+
+    # --- Apply similarity threshold and dynamic top_k ---
     results = []
-    for idx in top_indices:
-        chunk_id = _store["emb_ids"][idx]
-        chunk = _store["chunks"].get(chunk_id, {})
+    for cid in ranked_ids:
+        if len(results) >= RETRIEVAL_TOP_K_INITIAL:
+            break
+        # Use raw semantic score for threshold (combined score is normalized differently)
+        idx = id_to_idx.get(cid)
+        if idx is None:
+            continue
+        raw_score = float(semantic_scores[idx])
+        if raw_score < MIN_SIMILARITY_THRESHOLD:
+            continue
+
+        chunk = _store["chunks"].get(cid, {})
+
+        # Metadata filtering
+        if metadata_filters and metadata_filters.get("content_type"):
+            if chunk.get("content_type") != metadata_filters["content_type"]:
+                continue
+
         results.append({
-            "id": chunk_id,
+            "id": cid,
             "text": chunk.get("text", ""),
-            "score": float(scores[idx]),
+            "score": raw_score,
+            "combined_score": combined_scores[cid],
             "source_file": chunk.get("source_file", ""),
             "section": chunk.get("section", ""),
             "category": chunk.get("category", ""),
@@ -232,6 +515,30 @@ def search_similar(query: str, top_k: int = 8) -> list[dict]:
             "content_type": chunk.get("content_type", "text"),
             "all_urls": chunk.get("all_urls", []),
         })
+
+    # --- Deduplicate ---
+    results = _deduplicate_results(results)
+
+    # --- Dynamic top_k based on score distribution ---
+    if len(results) > RETRIEVAL_TOP_K_FINAL_MIN:
+        # Find natural cutoff: if there's a big score drop, cut there
+        final_k = min(top_k, RETRIEVAL_TOP_K_FINAL_MAX, len(results))
+        for i in range(RETRIEVAL_TOP_K_FINAL_MIN, min(final_k, len(results))):
+            score_drop = results[i - 1]["score"] - results[i]["score"]
+            if score_drop > 0.08:  # significant gap
+                final_k = i
+                break
+        results = results[:final_k]
+
+    elapsed_ms = (time.time() - t0) * 1000
+    logger.info(
+        "Search: query='%s' results=%d top_score=%.3f min_score=%.3f elapsed=%.0fms",
+        query[:60], len(results),
+        results[0]["score"] if results else 0,
+        results[-1]["score"] if results else 0,
+        elapsed_ms,
+    )
+
     return results
 
 
@@ -254,6 +561,7 @@ class HistoryMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     history: list[HistoryMessage] = Field(default=[], max_length=20)
+    stream: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -280,48 +588,21 @@ def health():
     return resp
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, request: Request):
-    """RAG-powered chat: retrieve relevant chunks, generate answer with citations."""
-    client_ip = _get_client_ip(request)
-    if not _check_rate_limit(client_ip, "chat", RATE_LIMIT_MAX_CHAT):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait before sending more messages.")
-    _load_data()
-
-    # 0. Check chat cache — avoid expensive LLM call for repeated questions
-    cache_key = _chat_cache_key(req.message, req.history)
-    cached = _get_cached_chat(cache_key)
-    if cached:
-        return ChatResponse(answer=cached[0], sources=cached[1])
-
-    # 1. Retrieve relevant chunks
-    results = search_similar(req.message, top_k=6)
-
-    # 2. Build context — include paper links explicitly
-    context_parts = []
-    for i, r in enumerate(results):
-        source_label = r.get("title", r.get("section", "Unknown"))
-        topics = r.get("topics", [])
-        topic_str = f" [Topics: {', '.join(topics)}]" if topics else ""
-        content_type = r.get("content_type", "text")
-        url = r.get("url", "")
-
-        header = f"[Source {i+1}: {source_label}]"
-        if content_type == "paper" and url:
-            header += f" (Paper link: {url})"
-        header += topic_str
-
-        context_parts.append(f"{header}\n{r['text'][:1500]}")
-    context = "\n\n---\n\n".join(context_parts)
-
-    # 3. Build messages
-    system_prompt = """You are the GenAI Knowledge Explorer assistant. You help users navigate
+def _build_system_prompt() -> str:
+    """Build system prompt with metadata legend for content types."""
+    return """You are the GenAI Knowledge Explorer assistant. You help users navigate
 a comprehensive collection of generative AI resources including courses, research papers,
 interview prep materials, roadmaps, and tutorials.
 
+Source types in the context:
+- "paper" sources contain research papers — always include their direct link when referencing
+- "course" sources contain educational courses and tutorials
+- "interview" sources contain interview preparation materials
+- "text" sources contain general documentation and guides
+
 When answering:
 - Use the provided context to give accurate, specific answers
-- Always cite your sources using [Source N] notation
+- Always cite your sources using [Source N] notation (e.g., [Source 1], [Source 2])
 - When mentioning research papers, ALWAYS include their direct link if available in the context
 - When listing resources, include direct URLs when available
 - If the context doesn't contain enough info, say so honestly
@@ -329,36 +610,55 @@ When answering:
 - Be concise but thorough
 - For papers, format them as: **Paper Title** ([link](url)) — brief description"""
 
-    messages = [{"role": "system", "content": system_prompt}]
 
-    # Add conversation history (last 6 messages)
-    for msg in req.history[-6:]:
-        messages.append({"role": msg.role, "content": msg.content})
+def _build_context_with_budget(results: list[dict]) -> tuple[str, list[dict]]:
+    """
+    Build context from results, respecting token budget.
+    Returns (context_string, used_results) — may use fewer results if budget is tight.
+    """
+    context_parts = []
+    used_results = []
+    total_tokens = 0
 
-    # Add current message with context
-    user_msg = f"""Context from the knowledge base:
+    for i, r in enumerate(results):
+        source_label = r.get("title", r.get("section", "Unknown"))
+        topics = r.get("topics", [])
+        topic_str = f" [Topics: {', '.join(topics)}]" if topics else ""
+        content_type = r.get("content_type", "text")
+        url = r.get("url", "")
 
-{context}
+        header = f"[Source {i+1}: {source_label}] (type: {content_type})"
+        if content_type == "paper" and url:
+            header += f" (Paper link: {url})"
+        header += topic_str
 
----
+        text = _truncate_at_sentence(r["text"], MAX_CHARS_PER_SOURCE)
+        part = f"{header}\n{text}"
 
-User question: {req.message}"""
-    messages.append({"role": "user", "content": user_msg})
+        part_tokens = _count_tokens(part)
+        if total_tokens + part_tokens > CONTEXT_TOKEN_BUDGET and used_results:
+            break  # budget exceeded, stop adding sources
+        total_tokens += part_tokens
+        context_parts.append(part)
+        used_results.append(r)
 
-    # 4. Generate response via OpenAI
-    client = get_openai()
-    try:
-        response = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=1500,
-        )
-        answer = response.choices[0].message.content
-    except Exception:
-        raise HTTPException(status_code=502, detail="LLM service temporarily unavailable")
+    context = "\n\n---\n\n".join(context_parts)
+    return context, used_results
 
-    # 5. Format sources — include content_type and all_urls
+
+def _validate_citations(answer: str, num_sources: int) -> str:
+    """Validate [Source N] citations — flag invalid references."""
+    citation_pattern = re.compile(r'\[Source (\d+)\]')
+    for match in citation_pattern.finditer(answer):
+        n = int(match.group(1))
+        if n < 1 or n > num_sources:
+            # Replace invalid citation with a note
+            answer = answer.replace(match.group(0), f"[Source ?]")
+    return answer
+
+
+def _format_sources(results: list[dict]) -> list[dict]:
+    """Format source metadata for the response, including text snippet."""
     sources = []
     for r in results:
         sources.append({
@@ -370,7 +670,134 @@ User question: {req.message}"""
             "score": round(r.get("score", 0), 3),
             "content_type": r.get("content_type", "text"),
             "all_urls": r.get("all_urls", []),
+            "text_snippet": _truncate_at_sentence(r.get("text", ""), 300),
         })
+    return sources
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest, request: Request):
+    """RAG-powered chat: retrieve relevant chunks, generate answer with citations."""
+    t0 = time.time()
+    client_ip = _get_client_ip(request)
+    if not _check_rate_limit(client_ip, "chat", RATE_LIMIT_MAX_CHAT):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait before sending more messages.")
+    _load_data()
+
+    # 0. Check chat cache (skip for streaming requests)
+    cache_key = _chat_cache_key(req.message, req.history)
+    if not req.stream:
+        cached = _get_cached_chat(cache_key)
+        if cached:
+            logger.info("Chat cache hit for: '%s'", req.message[:60])
+            return ChatResponse(answer=cached[0], sources=cached[1])
+
+    # 1. Rewrite query for better retrieval (resolves conversational references)
+    search_query = _rewrite_query(req.message, req.history)
+
+    # 2. Extract metadata filters from query intent
+    metadata_filters = _extract_metadata_filters(req.message)
+
+    # 3. Retrieve relevant chunks (hybrid search + threshold + reranking)
+    results = search_similar(search_query, top_k=RETRIEVAL_TOP_K_FINAL_MAX, metadata_filters=metadata_filters)
+
+    # If metadata filter returned too few results, retry without filter
+    if len(results) < RETRIEVAL_TOP_K_FINAL_MIN and metadata_filters.get("content_type"):
+        logger.info("Retrying without metadata filter (got %d results)", len(results))
+        results = search_similar(search_query, top_k=RETRIEVAL_TOP_K_FINAL_MAX)
+
+    # 4. Build context with token budget management
+    context, used_results = _build_context_with_budget(results)
+
+    # 5. Assemble messages
+    system_prompt = _build_system_prompt()
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+    # Add conversation history (last 6 messages)
+    for msg in req.history[-6:]:
+        messages.append({"role": msg.role, "content": msg.content})
+
+    user_msg = f"""Context from the knowledge base:
+
+{context}
+
+---
+
+User question: {req.message}"""
+    messages.append({"role": "user", "content": user_msg})
+
+    # Check total token budget (model context)
+    total_tokens = sum(_count_tokens(m["content"]) for m in messages)
+    logger.info("Chat: total_prompt_tokens=%d, sources_used=%d", total_tokens, len(used_results))
+
+    # 6. Format sources for response
+    sources = _format_sources(used_results)
+
+    # 7. Generate response
+    client = get_openai()
+
+    if req.stream:
+        # --- Streaming mode: SSE ---
+        def _stream_response():
+            # First send sources as a JSON event
+            yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
+
+            try:
+                stream = client.chat.completions.create(
+                    model=CHAT_MODEL,
+                    messages=messages,
+                    temperature=0.3,
+                    max_tokens=1500,
+                    stream=True,
+                )
+                full_answer = ""
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        token = chunk.choices[0].delta.content
+                        full_answer += token
+                        yield f"event: token\ndata: {json.dumps({'text': token})}\n\n"
+
+                # Validate citations
+                validated = _validate_citations(full_answer, len(used_results))
+                if validated != full_answer:
+                    yield f"event: corrected\ndata: {json.dumps({'answer': validated})}\n\n"
+
+                # Cache the result
+                _set_chat_cache(cache_key, validated, sources)
+
+                elapsed_ms = (time.time() - t0) * 1000
+                logger.info("Chat streamed: query='%s' elapsed=%.0fms", req.message[:60], elapsed_ms)
+
+            except Exception as e:
+                logger.error("Streaming error: %s", str(e)[:300])
+                yield f"event: error\ndata: {json.dumps({'detail': 'LLM service temporarily unavailable'})}\n\n"
+
+            yield "event: done\ndata: {}\n\n"
+
+        return StreamingResponse(
+            _stream_response(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # --- Non-streaming mode ---
+    try:
+        response = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        answer = response.choices[0].message.content
+    except Exception as e:
+        logger.error("LLM error: %s", str(e)[:300])
+        raise HTTPException(status_code=502, detail="LLM service temporarily unavailable")
+
+    # Validate citations
+    answer = _validate_citations(answer, len(used_results))
+
+    elapsed_ms = (time.time() - t0) * 1000
+    logger.info("Chat: query='%s' elapsed=%.0fms cache=miss", req.message[:60], elapsed_ms)
 
     _set_chat_cache(cache_key, answer, sources)
     return ChatResponse(answer=answer, sources=sources)

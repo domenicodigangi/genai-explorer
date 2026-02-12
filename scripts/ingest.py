@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, asdict
 import chromadb
 from chromadb.config import Settings
 from openai import OpenAI
+import tiktoken
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -39,6 +40,30 @@ CHROMA_DIR = DATA_DIR / "chroma_db"
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
 BATCH_SIZE = 64  # OpenAI embedding batch size
+
+# Chunking configuration
+TARGET_CHUNK_TOKENS = 512         # sweet spot for text-embedding-3-small
+CHUNK_OVERLAP_TOKENS = 50        # ~200 chars overlap between consecutive chunks
+MIN_SECTION_CHARS = 50
+
+# Token counter (lazy-loaded)
+_enc: tiktoken.Encoding | None = None
+
+
+def _get_enc() -> tiktoken.Encoding:
+    global _enc
+    if _enc is None:
+        _enc = tiktoken.get_encoding("cl100k_base")
+    return _enc
+
+
+def _count_tokens(text: str) -> int:
+    return len(_get_enc().encode(text))
+
+
+def _tokens_to_chars_approx(tokens: int) -> int:
+    """Approximate character count from token count (avg ~4 chars/token)."""
+    return tokens * 4
 
 # Topic extraction – canonical topics we look for in content
 CANONICAL_TOPICS = [
@@ -413,22 +438,138 @@ def normalize_topic(topic: str) -> Optional[str]:
     return None
 
 
-def extract_topics(text: str) -> list[str]:
-    """Extract canonical topics mentioned in a text chunk."""
-    found = set()
-    text_lower = text.lower()
+_TOPIC_PATTERNS: dict[str, re.Pattern] | None = None
+_ALIAS_PATTERNS: dict[str, re.Pattern] | None = None
 
-    # Check canonical topics
+
+def _build_topic_patterns():
+    """Pre-compile word-boundary regex patterns for topics and aliases."""
+    global _TOPIC_PATTERNS, _ALIAS_PATTERNS
+    if _TOPIC_PATTERNS is not None:
+        return
+
+    _TOPIC_PATTERNS = {}
     for topic in CANONICAL_TOPICS:
-        if topic.lower() in text_lower:
+        escaped = re.escape(topic)
+        _TOPIC_PATTERNS[topic] = re.compile(r'(?<!\w)' + escaped + r'(?!\w)', re.IGNORECASE)
+
+    _ALIAS_PATTERNS = {}
+    for alias, canonical in TOPIC_ALIASES.items():
+        escaped = re.escape(alias)
+        _ALIAS_PATTERNS[(alias, canonical)] = re.compile(r'(?<!\w)' + escaped + r'(?!\w)', re.IGNORECASE)
+
+
+def extract_topics(text: str) -> list[str]:
+    """Extract canonical topics mentioned in a text chunk using word-boundary matching."""
+    _build_topic_patterns()
+    found = set()
+
+    # Check canonical topics with word boundaries
+    for topic, pattern in _TOPIC_PATTERNS.items():
+        if pattern.search(text):
             found.add(topic)
 
-    # Check aliases
-    for alias, canonical in TOPIC_ALIASES.items():
-        if alias in text_lower:
+    # Check aliases with word boundaries
+    for (alias, canonical), pattern in _ALIAS_PATTERNS.items():
+        if pattern.search(text):
             found.add(canonical)
 
     return sorted(found)
+
+
+def _compute_quality_score(text: str) -> float:
+    """
+    Score a chunk by information density. Returns 0.0-1.0.
+    Low scores indicate boilerplate (pure link lists, tables of contents, etc.).
+    """
+    lines = text.strip().split('\n')
+    if not lines:
+        return 0.0
+
+    total_chars = len(text)
+    if total_chars == 0:
+        return 0.0
+
+    # Count prose lines (not headings, links-only, separators, or table rows)
+    prose_chars = 0
+    for line in lines:
+        stripped = line.strip()
+        # Skip headings, separators, empty lines, table rows
+        if (not stripped or stripped.startswith('#') or stripped.startswith('|')
+                or stripped.startswith('---') or stripped.startswith('===')):
+            continue
+        # Skip lines that are purely links or bullets with just a link
+        if re.match(r'^[-*]\s*\[.+\]\(.+\)\s*$', stripped):
+            continue
+        prose_chars += len(stripped)
+
+    return min(prose_chars / total_chars, 1.0) if total_chars > 0 else 0.0
+
+
+def _split_with_overlap(paragraphs: list[str], title: str, rel_path: str,
+                         category: str, content_type: str) -> list[Chunk]:
+    """
+    Split paragraphs into chunks using token counting with overlap.
+    Target: ~TARGET_CHUNK_TOKENS tokens per chunk with CHUNK_OVERLAP_TOKENS overlap.
+    """
+    chunks = []
+    current_paras: list[str] = []
+    current_tokens = 0
+    chunk_idx = 0
+    target_chars = _tokens_to_chars_approx(TARGET_CHUNK_TOKENS)
+    overlap_chars = _tokens_to_chars_approx(CHUNK_OVERLAP_TOKENS)
+
+    def _emit_chunk(paras: list[str]) -> Chunk | None:
+        nonlocal chunk_idx
+        text = "\n\n".join(paras).strip()
+        if not text or len(text) < MIN_SECTION_CHARS:
+            return None
+        all_urls = extract_urls(text)
+        topics = extract_topics(text)
+        chunk_id = f"{rel_path}::{title}::{chunk_idx}"
+        chunk_idx += 1
+        return Chunk(
+            id=chunk_id,
+            text=text,
+            source_file=rel_path,
+            section=title,
+            category=category,
+            title=title,
+            url=all_urls[0] if all_urls else None,
+            topics=topics,
+            content_type=content_type,
+            all_urls=all_urls,
+        )
+
+    for para in paragraphs:
+        para_len = len(para)
+        if current_tokens + para_len > target_chars and current_paras:
+            chunk = _emit_chunk(current_paras)
+            if chunk:
+                chunks.append(chunk)
+
+            # Overlap: keep last paragraph(s) up to overlap_chars
+            overlap_paras: list[str] = []
+            overlap_len = 0
+            for p in reversed(current_paras):
+                if overlap_len + len(p) > overlap_chars:
+                    break
+                overlap_paras.insert(0, p)
+                overlap_len += len(p)
+
+            current_paras = overlap_paras
+            current_tokens = overlap_len
+
+        current_paras.append(para)
+        current_tokens += para_len
+
+    # Emit final chunk
+    if current_paras:
+        chunk = _emit_chunk(current_paras)
+        if chunk:
+            chunks.append(chunk)
+
+    return chunks
 
 
 def parse_markdown_to_chunks(filepath: Path) -> list[Chunk]:
@@ -467,7 +608,12 @@ def parse_markdown_to_chunks(filepath: Path) -> list[Chunk]:
 
     for i, section in enumerate(sections):
         section = section.strip()
-        if not section or len(section) < 50:
+        if not section or len(section) < MIN_SECTION_CHARS:
+            continue
+
+        # Quality filter: skip low-information-density sections
+        quality = _compute_quality_score(section)
+        if quality < 0.15:
             continue
 
         # Extract section title
@@ -476,49 +622,14 @@ def parse_markdown_to_chunks(filepath: Path) -> list[Chunk]:
         # Clean markdown artifacts from title
         title = re.sub(r'[*_`\[\]]', '', title).strip()
 
-        # For long sections, split into sub-chunks (~800 tokens ≈ 3200 chars)
-        if len(section) > 4000:
+        # Token-based chunking with overlap
+        target_chars = _tokens_to_chars_approx(TARGET_CHUNK_TOKENS)
+        if len(section) > target_chars * 1.5:
             paragraphs = section.split('\n\n')
-            current_chunk = ""
-            chunk_idx = 0
-            for para in paragraphs:
-                if len(current_chunk) + len(para) > 3200 and current_chunk:
-                    all_urls = extract_urls(current_chunk)
-                    topics = extract_topics(current_chunk)
-                    chunk_id = f"{rel_path}::{title}::{chunk_idx}"
-                    chunks.append(Chunk(
-                        id=chunk_id,
-                        text=current_chunk.strip(),
-                        source_file=rel_path,
-                        section=title,
-                        category=category,
-                        title=title,
-                        url=all_urls[0] if all_urls else None,
-                        topics=topics,
-                        content_type=content_type,
-                        all_urls=all_urls,
-                    ))
-                    current_chunk = para
-                    chunk_idx += 1
-                else:
-                    current_chunk += "\n\n" + para
-
-            if current_chunk.strip():
-                all_urls = extract_urls(current_chunk)
-                topics = extract_topics(current_chunk)
-                chunk_id = f"{rel_path}::{title}::{chunk_idx}"
-                chunks.append(Chunk(
-                    id=chunk_id,
-                    text=current_chunk.strip(),
-                    source_file=rel_path,
-                    section=title,
-                    category=category,
-                    title=title,
-                    url=all_urls[0] if all_urls else None,
-                    topics=topics,
-                    content_type=content_type,
-                    all_urls=all_urls,
-                ))
+            sub_chunks = _split_with_overlap(
+                paragraphs, title, rel_path, category, content_type
+            )
+            chunks.extend(sub_chunks)
         else:
             all_urls = extract_urls(section)
             topics = extract_topics(section)
@@ -760,13 +871,23 @@ def export_data(chunks: list[Chunk], topic_graph: dict, embeddings: list[list[fl
     print(f"✅ Exported topic graph ({len(topic_graph['nodes'])} nodes, {len(topic_graph['edges'])} edges)")
 
     # Lightweight embeddings export for Vercel (fallback if ChromaDB unavailable)
-    # Store as {id: embedding} but only first 256 dims to save space
     lightweight = {}
     for chunk, emb in zip(chunks, embeddings):
         lightweight[chunk.id] = emb  # full embeddings for accuracy
     with open(DATA_DIR / "embeddings.json", "w") as f:
         json.dump(lightweight, f)
     print(f"✅ Exported embeddings to {DATA_DIR / 'embeddings.json'}")
+
+    # Embedding versioning metadata
+    emb_meta = {
+        "model": EMBEDDING_MODEL,
+        "dimensions": EMBEDDING_DIM,
+        "chunk_count": len(chunks),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(DATA_DIR / "embeddings_meta.json", "w") as f:
+        json.dump(emb_meta, f, indent=2)
+    print(f"✅ Exported embeddings metadata")
 
 
 # ---------------------------------------------------------------------------

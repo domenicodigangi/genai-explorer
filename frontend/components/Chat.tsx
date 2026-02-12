@@ -11,6 +11,7 @@ interface Message {
   content: string;
   sources?: Source[];
   isError?: boolean;
+  feedback?: 'up' | 'down' | null;
 }
 
 interface Source {
@@ -22,6 +23,7 @@ interface Source {
   score: number;
   content_type: string;
   all_urls: string[];
+  text_snippet?: string;
 }
 
 interface ChatProps {
@@ -40,14 +42,75 @@ const SUGGESTIONS = [
 
 const MAX_SESSION_MESSAGES = 50;
 
+/** Parse SSE stream and dispatch events. */
+async function readSSEStream(
+  response: Response,
+  onSources: (sources: Source[]) => void,
+  onToken: (text: string) => void,
+  onCorrected: (answer: string) => void,
+  onError: (detail: string) => void,
+  onDone: () => void,
+) {
+  const reader = response.body?.getReader();
+  if (!reader) { onError('No response stream'); return; }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Parse SSE events from buffer
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    let currentEvent = '';
+    for (const line of lines) {
+      if (line.startsWith('event: ')) {
+        currentEvent = line.slice(7).trim();
+      } else if (line.startsWith('data: ')) {
+        const data = line.slice(6);
+        try {
+          const parsed = JSON.parse(data);
+          switch (currentEvent) {
+            case 'sources':
+              onSources(parsed as Source[]);
+              break;
+            case 'token':
+              onToken(parsed.text);
+              break;
+            case 'corrected':
+              onCorrected(parsed.answer);
+              break;
+            case 'error':
+              onError(parsed.detail || 'Unknown error');
+              break;
+            case 'done':
+              onDone();
+              break;
+          }
+        } catch {
+          // skip malformed JSON
+        }
+        currentEvent = '';
+      }
+    }
+  }
+}
+
 export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [cooldown, setCooldown] = useState(false);
+  const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
   const cooldownRef = useRef<ReturnType<typeof setTimeout>>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const streamContentRef = useRef('');
 
   // Cleanup cooldown timer
   useEffect(() => {
@@ -68,18 +131,44 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, isStreaming]);
 
   const userMessageCount = useMemo(
     () => messages.filter(m => m.role === 'user').length,
     [messages],
   );
 
+  const toggleSourceExpanded = useCallback((msgIdx: number, srcIdx: number) => {
+    const key = `${msgIdx}-${srcIdx}`;
+    setExpandedSources(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const setFeedback = useCallback((msgIdx: number, feedback: 'up' | 'down') => {
+    setMessages(prev => prev.map((msg, i) => {
+      if (i !== msgIdx) return msg;
+      return { ...msg, feedback: msg.feedback === feedback ? null : feedback };
+    }));
+  }, []);
+
+  /** Scroll a source card into view */
+  const scrollToSource = useCallback((msgIdx: number, sourceNum: number) => {
+    const el = document.getElementById(`source-${msgIdx}-${sourceNum - 1}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      el.classList.add('ring-1', 'ring-violet-500/50');
+      setTimeout(() => el.classList.remove('ring-1', 'ring-violet-500/50'), 2000);
+    }
+  }, []);
+
   const sendMessage = useCallback(async (text?: string) => {
     const messageText = text || input.trim();
-    if (!messageText || isLoading || cooldown) return;
+    if (!messageText || isLoading || isStreaming || cooldown) return;
 
-    // Session message limit
     if (userMessageCount >= MAX_SESSION_MESSAGES) {
       setMessages(prev => [...prev, {
         role: 'assistant',
@@ -96,23 +185,84 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
 
     try {
       const history = messages.map(m => ({ role: m.role, content: m.content }));
+
+      // Use streaming mode
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: messageText, history }),
+        body: JSON.stringify({ message: messageText, history, stream: true }),
       });
 
       if (!res.ok) {
         throw new Error(res.status === 429 ? 'RATE_LIMITED' : `API error: ${res.status}`);
       }
 
-      const data = await res.json();
-      const assistantMessage: Message = {
-        role: 'assistant',
-        content: data.answer,
-        sources: data.sources,
-      };
-      setMessages(prev => [...prev, assistantMessage]);
+      // Check if server returned SSE or JSON
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        // Streaming mode
+        setIsLoading(false);
+        setIsStreaming(true);
+        streamContentRef.current = '';
+
+        // Add placeholder assistant message
+        setMessages(prev => [...prev, { role: 'assistant', content: '', sources: [] }]);
+
+        await readSSEStream(
+          res,
+          (sources) => {
+            setMessages(prev => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last.role === 'assistant') {
+                copy[copy.length - 1] = { ...last, sources };
+              }
+              return copy;
+            });
+          },
+          (token) => {
+            streamContentRef.current += token;
+            const content = streamContentRef.current;
+            setMessages(prev => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last.role === 'assistant') {
+                copy[copy.length - 1] = { ...last, content };
+              }
+              return copy;
+            });
+          },
+          (correctedAnswer) => {
+            setMessages(prev => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last.role === 'assistant') {
+                copy[copy.length - 1] = { ...last, content: correctedAnswer };
+              }
+              return copy;
+            });
+          },
+          (detail) => {
+            setMessages(prev => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last.role === 'assistant') {
+                copy[copy.length - 1] = { ...last, content: detail, isError: true };
+              }
+              return copy;
+            });
+          },
+          () => { /* done */ },
+        );
+      } else {
+        // Fallback: non-streaming JSON response
+        const data = await res.json();
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: data.answer,
+          sources: data.sources,
+        }]);
+      }
     } catch (err) {
       const isRateLimited = err instanceof Error && err.message === 'RATE_LIMITED';
       setMessages(prev => [
@@ -127,16 +277,20 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
       ]);
     } finally {
       setIsLoading(false);
+      setIsStreaming(false);
+      streamContentRef.current = '';
       setCooldown(true);
       cooldownRef.current = setTimeout(() => setCooldown(false), 2000);
     }
-  }, [input, isLoading, cooldown, messages, userMessageCount]);
+  }, [input, isLoading, isStreaming, cooldown, messages, userMessageCount]);
 
   const resetChat = useCallback(() => {
     setMessages([]);
     setInput('');
     setIsLoading(false);
+    setIsStreaming(false);
     setCooldown(false);
+    setExpandedSources(new Set());
     if (cooldownRef.current) clearTimeout(cooldownRef.current);
     setTimeout(() => inputRef.current?.focus(), 100);
   }, []);
@@ -166,6 +320,44 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
       case 'research_updates': return 'Research';
       default: return cat;
     }
+  };
+
+  /** Render markdown with clickable [Source N] citations */
+  const renderContent = (content: string, msgIdx: number) => {
+    // Replace [Source N] with clickable links
+    const processed = content.replace(
+      /\[Source (\d+)\]/g,
+      (match, num) => `[${match}](#source-ref-${msgIdx}-${num})`
+    );
+
+    return (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkGemoji]}
+        components={{
+          a: ({ href, children }) => {
+            // Handle source citation clicks
+            const sourceMatch = href?.match(/#source-ref-(\d+)-(\d+)/);
+            if (sourceMatch) {
+              const mi = parseInt(sourceMatch[1], 10);
+              const sn = parseInt(sourceMatch[2], 10);
+              return (
+                <button
+                  onClick={() => scrollToSource(mi, sn)}
+                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-500/15 text-violet-300 hover:bg-violet-500/25 transition-colors cursor-pointer no-underline align-baseline"
+                >
+                  {String(children)}
+                </button>
+              );
+            }
+            const safeHref = sanitizeUrl(href);
+            if (!safeHref) return <span>{children}</span>;
+            return <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a>;
+          },
+        }}
+      >
+        {processed}
+      </ReactMarkdown>
+    );
   };
 
   return (
@@ -215,8 +407,8 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
           </div>
         )}
 
-        {messages.map((msg, i) => (
-          <div key={i} className={`chat-message ${msg.role} rounded-xl px-5 py-4 max-w-3xl ${
+        {messages.map((msg, msgIdx) => (
+          <div key={msgIdx} className={`chat-message ${msg.role} rounded-xl px-5 py-4 max-w-3xl ${
             msg.role === 'user' ? 'ml-auto max-w-xl' : ''
           } ${msg.isError ? 'border-l-2 !border-l-rose-500/50 !bg-rose-500/5' : ''}`}>
             {/* Role label */}
@@ -228,19 +420,40 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
 
             {/* Content */}
             <div className="prose-chat text-sm text-[var(--text-primary)]">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkGemoji]}
-                components={{
-                  a: ({ href, children }) => {
-                    const safeHref = sanitizeUrl(href);
-                    if (!safeHref) return <span>{children}</span>;
-                    return <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a>;
-                  },
-                }}
-              >
-                {msg.content}
-              </ReactMarkdown>
+              {renderContent(msg.content, msgIdx)}
             </div>
+
+            {/* Feedback buttons */}
+            {msg.role === 'assistant' && msg.content && !msg.isError && (
+              <div className="flex items-center gap-1 mt-3">
+                <button
+                  onClick={() => setFeedback(msgIdx, 'up')}
+                  className={`p-1.5 rounded transition-colors ${
+                    msg.feedback === 'up'
+                      ? 'text-emerald-400 bg-emerald-500/15'
+                      : 'text-[var(--text-muted)] hover:text-emerald-400 hover:bg-emerald-500/10'
+                  }`}
+                  title="Helpful"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/>
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setFeedback(msgIdx, 'down')}
+                  className={`p-1.5 rounded transition-colors ${
+                    msg.feedback === 'down'
+                      ? 'text-rose-400 bg-rose-500/15'
+                      : 'text-[var(--text-muted)] hover:text-rose-400 hover:bg-rose-500/10'
+                  }`}
+                  title="Not helpful"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/>
+                  </svg>
+                </button>
+              </div>
+            )}
 
             {/* Sources */}
             {msg.sources && msg.sources.length > 0 && (
@@ -249,76 +462,89 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                   Sources
                 </div>
                 <div className="space-y-2">
-                  {msg.sources.filter(s => s.title).slice(0, 6).map((source, j) => (
-                    <div key={j} className="flex items-start gap-2 text-xs group">
-                      {/* Content type badge */}
-                      <span className={`flex-shrink-0 inline-flex items-center gap-1 font-medium min-w-[70px] ${
-                        source.content_type === 'paper'
-                          ? 'text-rose-400'
-                          : categoryColor(source.category)
-                      }`}>
-                        {source.content_type === 'paper' ? (
-                          <>
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                              <polyline points="14 2 14 8 20 8"/>
-                            </svg>
-                            Paper
-                          </>
-                        ) : categoryLabel(source.category)}
-                      </span>
-
-                      {/* Title */}
-                      <span className="text-[var(--text-secondary)] truncate flex-1">
-                        {source.title}
-                      </span>
-
-                      {/* Action buttons */}
-                      <span className="flex items-center gap-1.5 flex-shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
-                        {/* Paper link — prominent */}
-                        {source.content_type === 'paper' && sanitizeUrl(source.url) && (
-                          <a
-                            href={sanitizeUrl(source.url)!}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 transition-colors text-xs font-medium"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                              <polyline points="15 3 21 3 21 9"/>
-                              <line x1="10" y1="14" x2="21" y2="3"/>
-                            </svg>
-                            Read Paper
-                          </a>
-                        )}
-                        {/* Other URLs */}
-                        {source.content_type !== 'paper' && sanitizeUrl(source.url) && (
-                          <a
-                            href={sanitizeUrl(source.url)!}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors text-xs font-medium"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                              <polyline points="15 3 21 3 21 9"/>
-                              <line x1="10" y1="14" x2="21" y2="3"/>
-                            </svg>
-                            Open
-                          </a>
-                        )}
-                        {/* Additional URLs for papers */}
-                        {source.all_urls && source.all_urls.length > 1 && (
-                          <span className="text-xs text-[var(--text-muted)]">
-                            +{source.all_urls.length - 1} links
+                  {msg.sources.filter(s => s.title).slice(0, 8).map((source, j) => {
+                    const isExpanded = expandedSources.has(`${msgIdx}-${j}`);
+                    return (
+                      <div key={j} id={`source-${msgIdx}-${j}`} className="text-xs rounded-lg transition-all">
+                        <div className="flex items-start gap-2 group">
+                          {/* Content type badge */}
+                          <span className={`flex-shrink-0 inline-flex items-center gap-1 font-medium min-w-[70px] ${
+                            source.content_type === 'paper'
+                              ? 'text-rose-400'
+                              : categoryColor(source.category)
+                          }`}>
+                            {source.content_type === 'paper' ? (
+                              <>
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                  <polyline points="14 2 14 8 20 8"/>
+                                </svg>
+                                Paper
+                              </>
+                            ) : categoryLabel(source.category)}
                           </span>
+
+                          {/* Title — clickable to expand */}
+                          <button
+                            onClick={() => toggleSourceExpanded(msgIdx, j)}
+                            className="text-[var(--text-secondary)] truncate flex-1 text-left hover:text-[var(--text-primary)] transition-colors"
+                            title={source.text_snippet ? 'Click to show context' : source.title}
+                          >
+                            {source.title}
+                          </button>
+
+                          {/* Action buttons */}
+                          <span className="flex items-center gap-1.5 flex-shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
+                            {source.content_type === 'paper' && sanitizeUrl(source.url) && (
+                              <a
+                                href={sanitizeUrl(source.url)!}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 transition-colors text-xs font-medium"
+                              >
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                                  <polyline points="15 3 21 3 21 9"/>
+                                  <line x1="10" y1="14" x2="21" y2="3"/>
+                                </svg>
+                                Read Paper
+                              </a>
+                            )}
+                            {source.content_type !== 'paper' && sanitizeUrl(source.url) && (
+                              <a
+                                href={sanitizeUrl(source.url)!}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors text-xs font-medium"
+                              >
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                                  <polyline points="15 3 21 3 21 9"/>
+                                  <line x1="10" y1="14" x2="21" y2="3"/>
+                                </svg>
+                                Open
+                              </a>
+                            )}
+                            {source.all_urls && source.all_urls.length > 1 && (
+                              <span className="text-xs text-[var(--text-muted)]">
+                                +{source.all_urls.length - 1} links
+                              </span>
+                            )}
+                            <span className="text-xs text-[var(--text-muted)]">
+                              {(source.score * 100).toFixed(0)}%
+                            </span>
+                          </span>
+                        </div>
+
+                        {/* Expandable source context */}
+                        {isExpanded && source.text_snippet && (
+                          <div className="mt-1.5 ml-[78px] p-2 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--text-muted)] text-[11px] leading-relaxed">
+                            {source.text_snippet}
+                          </div>
                         )}
-                        <span className="text-xs text-[var(--text-muted)]">
-                          {(source.score * 100).toFixed(0)}%
-                        </span>
-                      </span>
-                    </div>
-                  ))}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -363,7 +589,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
           />
           <button
             onClick={() => sendMessage()}
-            disabled={!input.trim() || isLoading || cooldown}
+            disabled={!input.trim() || isLoading || isStreaming || cooldown}
             className="p-3 text-[var(--text-muted)] hover:text-violet-400 disabled:opacity-30 transition-colors"
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
