@@ -29,9 +29,9 @@ Built on top of the [awesome-generative-ai-guide](https://github.com/aishwaryanr
          │                  │
          ▼                  ▼
 ┌────────────────┐  ┌───────────────┐
-│   ChromaDB     │  │ OpenAI API    │
-│ (Vector Store) │  │ (Embeddings + │
-│                │  │  Chat GPT-4.1)│
+│ Numpy Cosine   │  │ OpenAI API    │
+│ Similarity     │  │ (Embeddings + │
+│ (in-memory)    │  │  Chat GPT-4.1)│
 └────────────────┘  └───────────────┘
          ▲
          │
@@ -42,7 +42,7 @@ Built on top of the [awesome-generative-ai-guide](https://github.com/aishwaryanr
 │  • Parse markdown → chunks         │
 │  • Generate embeddings             │
 │  • Build topic graph               │
-│  • Store in ChromaDB + JSON        │
+│  • Export to JSON (+ ChromaDB)     │
 └────────────────────────────────────┘
 ```
 
@@ -53,7 +53,7 @@ Built on top of the [awesome-generative-ai-guide](https://github.com/aishwaryanr
 | Frontend    | Next.js 14, TypeScript, Tailwind CSS |
 | Viz         | D3.js (force graph + treemap)       |
 | Backend     | FastAPI (Python)                    |
-| Vector DB   | ChromaDB (persistent, file-based)   |
+| Vector Search | Numpy cosine similarity (in-memory) |
 | Embeddings  | OpenAI `text-embedding-3-small`     |
 | Chat LLM    | OpenAI `gpt-4.1-mini`              |
 | Deployment  | Vercel (serverless)                 |
@@ -102,10 +102,10 @@ uv run python scripts/ingest.py
 
 This takes ~2-3 minutes (depending on the number of chunks and your API rate).
 It creates:
-- `data/chroma_db/` — ChromaDB persistent vector store
 - `data/chunks.json` — All parsed chunks with metadata
 - `data/topic_graph.json` — Topic graph (nodes, edges, hierarchy)
-- `data/embeddings.json` — Pre-computed embeddings (Vercel fallback)
+- `data/embeddings.json` — Pre-computed embeddings for vector search
+- `data/chroma_db/` — ChromaDB store (local dev only, gitignored)
 - `data/ingestion_meta.json` — Ingestion metadata (source commit, timestamps)
 
 You can check if the upstream repo has new data without running a full ingestion:
@@ -136,38 +136,99 @@ Open **http://localhost:3000** and start exploring!
 
 ## Deploying to Vercel
 
-### 1. Prepare
+### Prerequisites
 
-Make sure the ingestion pipeline has been run and `data/` folder contains the
-generated files. These will be bundled with the deployment.
+- A [Vercel account](https://vercel.com/signup)
+- Your repo pushed to GitHub
+- The ingestion pipeline has been run (`data/chunks.json`, `data/topic_graph.json`, and `data/embeddings.json` exist and are committed)
 
-### 2. Install Vercel CLI
+### Step 1: Import Project
+
+1. Go to [vercel.com/new](https://vercel.com/new)
+2. Click **Import Git Repository** and select your `genai-explorer` repo
+3. Vercel auto-detects the monorepo structure from `vercel.json`
+
+### Step 2: Configure Environment Variables
+
+In the Vercel dashboard under **Project Settings > Environment Variables**, add:
+
+| Variable | Value | Required |
+|----------|-------|----------|
+| `OPENAI_API_KEY` | Your OpenAI API key | Yes |
+| `ALLOWED_ORIGINS` | Your production URL (e.g. `https://genai-explorer.vercel.app`) | After first deploy |
+
+> **Never** put your API key in the repo. Always use the Vercel dashboard.
+
+### Step 3: Deploy
+
+Click **Deploy**. Vercel will:
+- Build the Next.js frontend via `@vercel/next`
+- Deploy the FastAPI backend via `@vercel/python`
+- Apply security headers from `vercel.json` (CSP, HSTS, X-Frame-Options, etc.)
+- Route `/api/*` to the Python function, everything else to Next.js
+
+### Step 4: Post-Deploy
+
+1. Copy your production URL from the Vercel dashboard
+2. Go to **Settings > Environment Variables** and set `ALLOWED_ORIGINS` to that URL
+3. Redeploy (Deployments > latest > Redeploy)
+4. Set a monthly spend cap in your [OpenAI dashboard](https://platform.openai.com/settings/organization/limits)
+
+### Verify
 
 ```bash
-npm install -g vercel
+# Health check
+curl https://your-app.vercel.app/api/health
+# Expected: {"status":"ok","data_loaded":true}
+
+# Security headers
+curl -I https://your-app.vercel.app/
+# Should include X-Frame-Options, Content-Security-Policy, Strict-Transport-Security, etc.
 ```
 
-### 3. Configure Environment Variables
+### Troubleshooting
 
-In the Vercel dashboard (or via CLI), set:
+**"Serverless Function exceeds 250 MB unzipped"**
+
+The Python function bundle is too large. Check that `chromadb` is **not** in `requirements.txt` — it pulls ~100+ MB of transitive dependencies (onnxruntime, grpcio, etc.) and is not used on Vercel. The API uses lightweight numpy cosine similarity with pre-computed embeddings instead. Only these packages should be in `requirements.txt`:
 
 ```
-OPENAI_API_KEY=sk-...
+fastapi>=0.111.0
+uvicorn>=0.30.0
+openai>=1.30.0
+numpy>=1.26.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
 ```
 
-### 4. Deploy
+**"uv sync --locked failed"**
+
+The `uv.lock` file is out of sync with `pyproject.toml`. Regenerate it locally and push:
 
 ```bash
-vercel
+uv lock
+git add uv.lock && git commit -m "Regenerate uv.lock" && git push
 ```
 
-Follow the prompts. The `vercel.json` is pre-configured to route `/api/*`
-to the Python serverless function and everything else to the Next.js frontend.
+**"unknown field `python`" in pyproject.toml**
 
-> **Note on Vercel + ChromaDB**: On Vercel serverless, the filesystem is
-> ephemeral. The backend automatically falls back to a lightweight numpy-based
-> similarity search using the pre-computed `embeddings.json` file. For
-> production, consider using a hosted vector DB.
+Newer versions of `uv` don't recognize `python = "3.12"` under `[tool.uv]`. Remove the `[tool.uv]` section — use `requires-python = ">=3.11"` in `[project]` instead.
+
+**"routes cannot be present" with headers/rewrites**
+
+Vercel doesn't allow the legacy `routes` field alongside `headers`, `rewrites`, or `redirects`. Use `rewrites` instead of `routes` in `vercel.json` — see the current config for the correct format.
+
+**Chat returns 502 "LLM service temporarily unavailable"**
+
+The `OPENAI_API_KEY` environment variable is missing or invalid in Vercel. Check **Settings > Environment Variables** and redeploy.
+
+**CORS errors in browser console**
+
+Set `ALLOWED_ORIGINS` in Vercel environment variables to your production domain. On Vercel, the frontend and API share the same origin so CORS is rarely triggered, but the explicit allowlist is defense-in-depth.
+
+### How It Works on Vercel
+
+The deployed API uses **numpy cosine similarity** on pre-computed embeddings instead of ChromaDB (which requires persistent disk that Vercel's ephemeral serverless functions don't provide). At ~700 vectors with 1536 dimensions, brute-force cosine similarity takes <1ms — far less than the ~300ms OpenAI API call. This approach requires zero additional infrastructure.
 
 ---
 
@@ -182,10 +243,10 @@ genai-knowledge-explorer/
 ├── .github/workflows/
 │   └── update-data.yml       # Automated weekly data update pipeline
 ├── data/                     # Generated data (after running ingest.py)
-│   ├── chroma_db/            # ChromaDB persistent store
 │   ├── chunks.json           # Parsed chunks with metadata
 │   ├── topic_graph.json      # Topic graph for visualization
-│   ├── embeddings.json       # Pre-computed embeddings
+│   ├── embeddings.json       # Pre-computed embeddings for search
+│   ├── chroma_db/            # ChromaDB store (local only, gitignored)
 │   └── ingestion_meta.json   # Ingestion metadata (source commit, timestamps)
 ├── frontend/
 │   ├── app/
@@ -197,6 +258,8 @@ genai-knowledge-explorer/
 │   │   ├── TopicGraph.tsx    # D3.js force-directed graph
 │   │   ├── TopicTree.tsx     # D3.js treemap visualization
 │   │   └── TopicDetail.tsx   # Topic detail panel
+│   ├── lib/
+│   │   └── sanitizeUrl.ts    # URL protocol validation
 │   ├── package.json
 │   ├── next.config.js
 │   ├── tailwind.config.js
@@ -258,7 +321,7 @@ The workflow needs an `OPENAI_API_KEY` repository secret (Settings > Secrets and
 3. **Extract** topics from each chunk using keyword matching against 50+ canonical GenAI topics
 4. **Generate** embeddings via OpenAI `text-embedding-3-small`
 5. **Build** a co-occurrence topic graph (topics that appear in the same chunk are connected)
-6. **Store** in ChromaDB + export as JSON
+6. **Export** as JSON files (+ ChromaDB for local dev)
 
 ### RAG Chat
 
@@ -287,7 +350,7 @@ The ingestion pipeline has a dedicated markdown table parser that:
 
 | Endpoint               | Method | Description                              |
 |------------------------|--------|------------------------------------------|
-| `/api/health`          | GET    | Health check with data stats             |
+| `/api/health`          | GET    | Health check                             |
 | `/api/chat`            | POST   | RAG chat (body: `{message, history}`)    |
 | `/api/search?q=...`    | GET    | Semantic search                          |
 | `/api/graph`           | GET    | Full topic graph (nodes, edges, hierarchy)|
