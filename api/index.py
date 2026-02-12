@@ -12,16 +12,18 @@ LLM: OpenAI gpt-4.1-mini (chat) + text-embedding-3-small (embeddings)
 
 import json
 import os
+import time
+from collections import defaultdict
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
-from typing import Optional
 
+import httpx
 import numpy as np
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
@@ -30,12 +32,16 @@ from openai import OpenAI
 
 app = FastAPI(title="GenAI Knowledge Explorer API")
 
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS", "http://localhost:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 # ---------------------------------------------------------------------------
@@ -109,7 +115,29 @@ def _load_data():
 
 def get_openai() -> OpenAI:
     """Single OpenAI client for both chat and embeddings."""
-    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+    return OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY", ""),
+        timeout=httpx.Timeout(30.0, connect=5.0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting — simple in-memory sliding window (per IP)
+# ---------------------------------------------------------------------------
+
+_rate_limits: dict[str, list[float]] = defaultdict(list)
+RATE_LIMIT_WINDOW = 60       # seconds
+RATE_LIMIT_MAX = 10          # max chat requests per window per IP
+
+
+def _check_rate_limit(ip: str) -> bool:
+    """Return True if request is allowed, False if rate limited."""
+    now = time.time()
+    _rate_limits[ip] = [t for t in _rate_limits[ip] if t > now - RATE_LIMIT_WINDOW]
+    if len(_rate_limits[ip]) >= RATE_LIMIT_MAX:
+        return False
+    _rate_limits[ip].append(now)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +201,21 @@ def search_similar(query: str, top_k: int = 8) -> list[dict]:
 # Pydantic models
 # ---------------------------------------------------------------------------
 
+class HistoryMessage(BaseModel):
+    role: str
+    content: str = Field(max_length=2000)
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        if v not in ("user", "assistant"):
+            raise ValueError("role must be 'user' or 'assistant'")
+        return v
+
+
 class ChatRequest(BaseModel):
-    message: str
-    history: list[dict] = []  # [{"role": "user"|"assistant", "content": "..."}]
+    message: str = Field(min_length=1, max_length=2000)
+    history: list[HistoryMessage] = Field(default=[], max_length=20)
 
 
 class ChatResponse(BaseModel):
@@ -190,19 +230,23 @@ class ChatResponse(BaseModel):
 @app.get("/api/health")
 def health():
     _load_data()
-    return {
-        "status": "ok",
-        "chunks": len(_store.get("chunks", {})),
-        "topics": len(_store.get("graph", {}).get("nodes", [])),
-        "has_chroma": _store.get("chroma") is not None,
-        "chat_model": CHAT_MODEL,
-        "embedding_model": EMBEDDING_MODEL,
-    }
+    resp: dict = {"status": "ok", "data_loaded": bool(_store.get("chunks"))}
+    if os.environ.get("DEBUG_HEALTH"):
+        resp.update({
+            "chunks": len(_store.get("chunks", {})),
+            "topics": len(_store.get("graph", {}).get("nodes", [])),
+            "has_chroma": _store.get("chroma") is not None,
+        })
+    return resp
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, request: Request):
     """RAG-powered chat: retrieve relevant chunks, generate answer with citations."""
+    client_ip = (request.headers.get("x-forwarded-for", "") or
+                 (request.client.host if request.client else "unknown")).split(",")[0].strip()
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait before sending more messages.")
     _load_data()
 
     # 1. Retrieve relevant chunks
@@ -244,7 +288,7 @@ When answering:
 
     # Add conversation history (last 6 messages)
     for msg in req.history[-6:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": msg.role, "content": msg.content})
 
     # Add current message with context
     user_msg = f"""Context from the knowledge base:
@@ -258,14 +302,16 @@ User question: {req.message}"""
 
     # 4. Generate response via OpenAI
     client = get_openai()
-    response = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=messages,
-        temperature=0.3,
-        max_tokens=1500,
-    )
-
-    answer = response.choices[0].message.content
+    try:
+        response = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        answer = response.choices[0].message.content
+    except Exception:
+        raise HTTPException(status_code=502, detail="LLM service temporarily unavailable")
 
     # 5. Format sources — include content_type and all_urls
     sources = []
@@ -312,7 +358,7 @@ def get_topic(topic_id: str):
             break
 
     if not node:
-        return {"error": "Topic not found"}
+        raise HTTPException(status_code=404, detail="Topic not found")
 
     # Get connected topics
     connected = []

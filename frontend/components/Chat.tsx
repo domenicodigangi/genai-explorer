@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkGemoji from 'remark-gemoji';
+import { sanitizeUrl } from '@/lib/sanitizeUrl';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -176,9 +177,11 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkGemoji]}
                 components={{
-                  a: ({ href, children }) => (
-                    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
-                  ),
+                  a: ({ href, children }) => {
+                    const safeHref = sanitizeUrl(href);
+                    if (!safeHref) return <span>{children}</span>;
+                    return <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a>;
+                  },
                 }}
               >
                 {msg.content}
@@ -219,9 +222,9 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                       {/* Action buttons */}
                       <span className="flex items-center gap-1.5 flex-shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
                         {/* Paper link — prominent */}
-                        {source.content_type === 'paper' && source.url && (
+                        {source.content_type === 'paper' && sanitizeUrl(source.url) && (
                           <a
-                            href={source.url}
+                            href={sanitizeUrl(source.url)!}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 transition-colors text-xs font-medium"
@@ -235,9 +238,9 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                           </a>
                         )}
                         {/* Other URLs */}
-                        {source.content_type !== 'paper' && source.url && (
+                        {source.content_type !== 'paper' && sanitizeUrl(source.url) && (
                           <a
-                            href={source.url}
+                            href={sanitizeUrl(source.url)!}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-colors text-xs font-medium"

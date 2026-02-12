@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkGemoji from 'remark-gemoji';
 import { nameToEmoji } from 'gemoji';
+import { sanitizeUrl } from '@/lib/sanitizeUrl';
 
 /** Common non-standard shortcode aliases */
 const EMOJI_ALIASES: Record<string, string> = {
@@ -80,15 +81,21 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopic
     setLoading(true);
 
     fetch(`/api/topics/${topicId}`)
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      })
       .then(d => {
         if (!cancelled) {
-          setData(d.error ? null : d);
+          setData(d);
           setLoading(false);
         }
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setData(null);
+          setLoading(false);
+        }
       });
 
     return () => { cancelled = true; };
@@ -206,9 +213,9 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopic
                           : FILE_CATEGORY_LABELS[resource.category] || resource.category}
                       </span>
                     </div>
-                    {resource.url ? (
+                    {sanitizeUrl(resource.url) ? (
                       <a
-                        href={resource.url}
+                        href={sanitizeUrl(resource.url)!}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-sm text-[var(--text-primary)] hover:text-violet-400 transition-colors font-medium leading-tight block"
@@ -225,9 +232,11 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopic
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm, remarkGemoji]}
                           components={{
-                            a: ({ href, children }) => (
-                              <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
-                            ),
+                            a: ({ href, children }) => {
+                              const safeHref = sanitizeUrl(href);
+                              if (!safeHref) return <span>{children}</span>;
+                              return <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a>;
+                            },
                             p: ({ children }) => <span>{children} </span>,
                           }}
                         >
@@ -242,13 +251,13 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopic
                     {/* Additional links */}
                     {resource.all_urls && resource.all_urls.length > 1 && (
                       <div className="flex flex-wrap gap-1.5 mt-1.5">
-                        {resource.all_urls.filter(u => u !== resource.url).map((u, j) => {
+                        {resource.all_urls.filter(u => u !== resource.url && sanitizeUrl(u)).map((u, j) => {
                           let label = u;
                           try { label = new URL(u).hostname.replace('www.', ''); } catch {}
                           return (
                             <a
                               key={j}
-                              href={u}
+                              href={sanitizeUrl(u)!}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-xs text-violet-300 hover:bg-violet-500/20 transition-colors truncate max-w-[200px]"
