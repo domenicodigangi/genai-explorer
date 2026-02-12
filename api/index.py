@@ -221,6 +221,7 @@ def health(debug: str = Query("", alias="debug_secret")):
         "status": "ok",
         "data_loaded": bool(_store.get("chunks")),
         "api_key_set": has_key,
+        "debug_secret_set": bool(os.environ.get("DEBUG_SECRET")),
     }
     # Gate expensive OpenAI probe behind DEBUG_SECRET env var
     expected_secret = os.environ.get("DEBUG_SECRET")
