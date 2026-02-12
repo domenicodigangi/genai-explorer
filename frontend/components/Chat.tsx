@@ -340,10 +340,13 @@ export default function Chat({ initialQuery, onQueryConsumed, onExploreInGraph, 
 
   /** Render markdown with clickable [Source N] citations */
   const renderContent = (content: string, msgIdx: number) => {
-    // Replace [Source N] with clickable links
-    const processed = content.replace(
-      /\[Source (\d+)\]/g,
-      (match, num) => `[${match}](#source-ref-${msgIdx}-${num})`
+    // Replace [Source N] and compound [Source N, M, ...] with clickable markdown links
+    let processed = content.replace(
+      /\[Source ([\d,\s]+)\]/g,
+      (_match, nums: string) => {
+        const parts = nums.split(/,\s*/).map(n => n.trim()).filter(Boolean);
+        return parts.map(n => `[Source ${n}](#source-ref-${msgIdx}-${n})`).join(', ');
+      }
     );
 
     return (
