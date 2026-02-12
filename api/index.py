@@ -248,6 +248,32 @@ def health(debug: str = Query("", alias="debug_secret")):
     return resp
 
 
+@app.get("/api/debug-openai")
+def debug_openai():
+    """Raw HTTP test — bypasses OpenAI SDK to isolate SDK vs network issues."""
+    import urllib.request
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return {"error": "no key"}
+    payload = json.dumps({"input": ["test"], "model": EMBEDDING_MODEL}).encode()
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/embeddings",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+            return {"status": "ok", "dims": len(body["data"][0]["embedding"])}
+    except urllib.error.HTTPError as e:
+        return {"status": "http_error", "code": e.code, "body": e.read().decode()[:500]}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)[:500]}
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, request: Request):
     """RAG-powered chat: retrieve relevant chunks, generate answer with citations."""
