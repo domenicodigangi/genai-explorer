@@ -10,6 +10,7 @@ This script:
 5. Persists everything to ChromaDB + JSON files for the API
 """
 
+import argparse
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field, asdict
@@ -148,6 +150,63 @@ def clone_or_pull_repo():
         REPO_DIR.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", REPO_URL, str(REPO_DIR)], check=True)
     print(f"✅ Repo ready at {REPO_DIR}")
+
+
+def get_upstream_head_sha() -> tuple[str, str]:
+    """Return (commit_sha, commit_date_iso) of the upstream repo HEAD."""
+    result = subprocess.run(
+        ["git", "-C", str(REPO_DIR), "log", "-1", "--format=%H %cI"],
+        capture_output=True, text=True, check=True,
+    )
+    parts = result.stdout.strip().split(" ", 1)
+    return parts[0], parts[1]
+
+
+def check_for_upstream_changes() -> int:
+    """
+    Check if the upstream repo has changed since last ingestion.
+    Returns 0 if no changes (skip), 1 if changes detected (proceed).
+    """
+    clone_or_pull_repo()
+    current_sha, current_date = get_upstream_head_sha()
+    meta_path = DATA_DIR / "ingestion_meta.json"
+
+    if not meta_path.exists():
+        print(f"No ingestion metadata found. Changes detected (first run).")
+        print(f"Upstream HEAD: {current_sha[:12]} ({current_date})")
+        return 1
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    last_sha = meta.get("source_commit_sha", "")
+
+    if current_sha == last_sha:
+        print(f"No upstream changes detected. Last ingested: {current_sha[:12]} ({meta.get('ingested_at', 'unknown')})")
+        return 0
+    else:
+        print(f"Upstream changes detected!")
+        print(f"  Last ingested: {last_sha[:12]}")
+        print(f"  Upstream HEAD: {current_sha[:12]} ({current_date})")
+        return 1
+
+
+def write_ingestion_metadata(file_count: int, chunk_count: int, topic_count: int):
+    """Write ingestion metadata after a successful run."""
+    commit_sha, commit_date = get_upstream_head_sha()
+    meta = {
+        "source_repo": REPO_URL,
+        "source_commit_sha": commit_sha,
+        "source_commit_date": commit_date,
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "file_count": file_count,
+        "chunk_count": chunk_count,
+        "topic_count": topic_count,
+    }
+    meta_path = DATA_DIR / "ingestion_meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"✅ Metadata written to {meta_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -757,10 +816,34 @@ def main():
     print("\n📤 Exporting data...")
     export_data(all_chunks, topic_graph, embeddings)
 
+    # 7. Write ingestion metadata
+    print("\n📋 Writing ingestion metadata...")
+    write_ingestion_metadata(
+        file_count=len(md_files),
+        chunk_count=len(all_chunks),
+        topic_count=len(topic_graph['nodes']),
+    )
+
     print("\n✅ Ingestion complete!")
     print(f"   📁 ChromaDB: {CHROMA_DIR}")
     print(f"   📁 Data exports: {DATA_DIR}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Ingest upstream repo into GenAI Explorer data files."
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only check if upstream has changed. Exit 0 = no changes, exit 1 = changes detected.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.check_only:
+        sys.exit(check_for_upstream_changes())
+    else:
+        main()

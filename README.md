@@ -106,6 +106,14 @@ It creates:
 - `data/chunks.json` — All parsed chunks with metadata
 - `data/topic_graph.json` — Topic graph (nodes, edges, hierarchy)
 - `data/embeddings.json` — Pre-computed embeddings (Vercel fallback)
+- `data/ingestion_meta.json` — Ingestion metadata (source commit, timestamps)
+
+You can check if the upstream repo has new data without running a full ingestion:
+
+```bash
+uv run python scripts/ingest.py --check-only
+# Exit code 0 = no changes, 1 = changes detected
+```
 
 ### 4. Start the Backend
 
@@ -171,11 +179,14 @@ genai-knowledge-explorer/
 │   └── index.py              # FastAPI backend (all endpoints)
 ├── scripts/
 │   └── ingest.py             # Data ingestion pipeline
+├── .github/workflows/
+│   └── update-data.yml       # Automated weekly data update pipeline
 ├── data/                     # Generated data (after running ingest.py)
 │   ├── chroma_db/            # ChromaDB persistent store
 │   ├── chunks.json           # Parsed chunks with metadata
 │   ├── topic_graph.json      # Topic graph for visualization
-│   └── embeddings.json       # Pre-computed embeddings
+│   ├── embeddings.json       # Pre-computed embeddings
+│   └── ingestion_meta.json   # Ingestion metadata (source commit, timestamps)
 ├── frontend/
 │   ├── app/
 │   │   ├── layout.tsx        # Root layout
@@ -197,6 +208,44 @@ genai-knowledge-explorer/
 ├── requirements.txt          # Python deps (Vercel)
 └── README.md
 ```
+
+---
+
+## Keeping Data Up-to-Date
+
+The app's data comes from the [awesome-generative-ai-guide](https://github.com/aishwaryanr/awesome-generative-ai-guide) repo. A GitHub Actions pipeline keeps it in sync automatically.
+
+### Automated Updates
+
+A [workflow](.github/workflows/update-data.yml) runs **every Monday at 9:00 AM UTC** and:
+
+1. Pulls the latest upstream repo
+2. Compares the upstream HEAD commit against `data/ingestion_meta.json`
+3. **Skips** if nothing has changed
+4. Runs the full ingestion pipeline if changes are detected
+5. Verifies output files and runs a sanity check (data must not shrink below 80% of its previous size)
+6. Commits and pushes the updated data files to `main`
+
+### Manual Trigger
+
+You can trigger an update at any time from the GitHub Actions tab, or via the CLI:
+
+```bash
+gh workflow run update-data.yml
+```
+
+### Local Check
+
+To check if the upstream repo has new content without running a full ingestion:
+
+```bash
+uv run python scripts/ingest.py --check-only
+# Exit code 0 = no changes, 1 = changes detected
+```
+
+### Required Secret
+
+The workflow needs an `OPENAI_API_KEY` repository secret (Settings > Secrets and variables > Actions) for embedding generation.
 
 ---
 

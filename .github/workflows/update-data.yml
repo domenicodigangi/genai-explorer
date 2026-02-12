@@ -1,0 +1,153 @@
+name: Update Data from Upstream
+
+on:
+  schedule:
+    # Every Monday at 9:00 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+    # Manual trigger — no required inputs
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Clone upstream repo
+        run: |
+          if [ -d "repo_cache/.git" ]; then
+            git -C repo_cache pull
+          else
+            git clone https://github.com/aishwaryanr/awesome-generative-ai-guide.git repo_cache
+          fi
+
+      - name: Check for upstream changes
+        id: check_changes
+        run: |
+          UPSTREAM_SHA=$(git -C repo_cache log -1 --format='%H')
+          echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+
+          if [ -f "data/ingestion_meta.json" ]; then
+            LAST_SHA=$(python3 -c "import json; print(json.load(open('data/ingestion_meta.json')).get('source_commit_sha', ''))")
+          else
+            LAST_SHA=""
+          fi
+          echo "last_sha=${LAST_SHA}" >> "$GITHUB_OUTPUT"
+
+          if [ "${UPSTREAM_SHA}" = "${LAST_SHA}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No upstream changes detected. Last ingested: ${LAST_SHA:0:12}"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Upstream changes detected! Last: ${LAST_SHA:0:12} -> Current: ${UPSTREAM_SHA:0:12}"
+          fi
+
+      - name: Record baseline line counts
+        if: steps.check_changes.outputs.changed == 'true'
+        id: baseline
+        run: |
+          if [ -f "data/chunks.json" ]; then
+            OLD_CHUNKS=$(wc -l < data/chunks.json)
+          else
+            OLD_CHUNKS=0
+          fi
+          if [ -f "data/topic_graph.json" ]; then
+            OLD_GRAPH=$(wc -l < data/topic_graph.json)
+          else
+            OLD_GRAPH=0
+          fi
+          echo "old_chunks_lines=${OLD_CHUNKS}" >> "$GITHUB_OUTPUT"
+          echo "old_graph_lines=${OLD_GRAPH}" >> "$GITHUB_OUTPUT"
+          echo "Baseline: chunks.json=${OLD_CHUNKS} lines, topic_graph.json=${OLD_GRAPH} lines"
+
+      - name: Run ingestion
+        if: steps.check_changes.outputs.changed == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: uv run python scripts/ingest.py
+
+      - name: Verify output files
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          for file in data/chunks.json data/topic_graph.json data/ingestion_meta.json; do
+            if [ ! -s "$file" ]; then
+              echo "::error::Output file $file is missing or empty!"
+              exit 1
+            fi
+            echo "OK: $file ($(wc -c < "$file") bytes)"
+          done
+
+      - name: Sanity check line counts
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          OLD_CHUNKS=${{ steps.baseline.outputs.old_chunks_lines }}
+          NEW_CHUNKS=$(wc -l < data/chunks.json)
+          OLD_GRAPH=${{ steps.baseline.outputs.old_graph_lines }}
+          NEW_GRAPH=$(wc -l < data/topic_graph.json)
+
+          echo "chunks.json: ${OLD_CHUNKS} -> ${NEW_CHUNKS} lines"
+          echo "topic_graph.json: ${OLD_GRAPH} -> ${NEW_GRAPH} lines"
+
+          if [ "${OLD_CHUNKS}" -gt 0 ]; then
+            THRESHOLD=$(( OLD_CHUNKS * 80 / 100 ))
+            if [ "${NEW_CHUNKS}" -lt "${THRESHOLD}" ]; then
+              echo "::error::chunks.json shrank below 80% threshold! ${NEW_CHUNKS} < ${THRESHOLD} (was ${OLD_CHUNKS})"
+              exit 1
+            fi
+          fi
+
+          if [ "${OLD_GRAPH}" -gt 0 ]; then
+            THRESHOLD=$(( OLD_GRAPH * 80 / 100 ))
+            if [ "${NEW_GRAPH}" -lt "${THRESHOLD}" ]; then
+              echo "::error::topic_graph.json shrank below 80% threshold! ${NEW_GRAPH} < ${THRESHOLD} (was ${OLD_GRAPH})"
+              exit 1
+            fi
+          fi
+
+          echo "Sanity check passed."
+
+      - name: Commit and push
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/chunks.json data/topic_graph.json data/ingestion_meta.json
+
+          UPSTREAM_SHA="${{ steps.check_changes.outputs.upstream_sha }}"
+          CHUNK_COUNT=$(python3 -c "import json; print(json.load(open('data/ingestion_meta.json'))['chunk_count'])")
+          TOPIC_COUNT=$(python3 -c "import json; print(json.load(open('data/ingestion_meta.json'))['topic_count'])")
+          FILE_COUNT=$(python3 -c "import json; print(json.load(open('data/ingestion_meta.json'))['file_count'])")
+
+          git commit -m "$(cat <<EOF
+          Update data from upstream (${UPSTREAM_SHA:0:12})
+
+          Source: aishwaryanr/awesome-generative-ai-guide@${UPSTREAM_SHA:0:12}
+          Previous: ${{ steps.check_changes.outputs.last_sha }}
+          Chunks: ${CHUNK_COUNT} | Topics: ${TOPIC_COUNT} | Files: ${FILE_COUNT}
+          EOF
+          )"
+
+          git push origin main
