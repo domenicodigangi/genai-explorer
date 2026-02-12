@@ -216,11 +216,15 @@ class ChatResponse(BaseModel):
 @app.get("/api/health")
 def health(debug: str = Query("", alias="debug_secret")):
     _load_data()
-    has_key = bool((os.environ.get("OPENAI_API_KEY") or "").strip())
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    has_key = bool(api_key)
+    # Show masked prefix so we can verify the right key is deployed
+    key_preview = f"{api_key[:7]}...{api_key[-4:]}" if len(api_key) > 11 else "too_short"
     resp: dict = {
         "status": "ok",
         "data_loaded": bool(_store.get("chunks")),
         "api_key_set": has_key,
+        "api_key_preview": key_preview if has_key else None,
         "debug_secret_set": bool(os.environ.get("DEBUG_SECRET")),
     }
     # Gate expensive OpenAI probe behind DEBUG_SECRET env var
