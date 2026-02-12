@@ -214,7 +214,7 @@ class ChatResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
-def health():
+def health(debug: str = Query("", alias="debug_secret")):
     _load_data()
     has_key = bool((os.environ.get("OPENAI_API_KEY") or "").strip())
     resp: dict = {
@@ -222,7 +222,9 @@ def health():
         "data_loaded": bool(_store.get("chunks")),
         "api_key_set": has_key,
     }
-    if has_key:
+    # Gate expensive OpenAI probe behind DEBUG_SECRET env var
+    expected_secret = os.environ.get("DEBUG_SECRET", "")
+    if expected_secret and debug == expected_secret and has_key:
         try:
             client = get_openai()
             emb = client.embeddings.create(input=["health check"], model=EMBEDDING_MODEL)
@@ -231,7 +233,6 @@ def health():
         except Exception as e:
             resp["openai_status"] = "error"
             resp["openai_error"] = str(e)[:300]
-    if os.environ.get("DEBUG_HEALTH"):
         resp.update({
             "chunks": len(_store.get("chunks", {})),
             "topics": len(_store.get("graph", {}).get("nodes", [])),
