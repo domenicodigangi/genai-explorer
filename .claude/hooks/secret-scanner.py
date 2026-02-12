@@ -142,6 +142,7 @@ EXCLUDED_FILES = [
     'Pipfile.lock',
     'Cargo.lock',
     'go.sum',
+    'uv.lock',
     '.gitignore',
 ]
 
@@ -150,6 +151,7 @@ EXCLUDED_DIRS = [
     'node_modules/',
     'vendor/',
     '.git/',
+    '.claude/',
     'dist/',
     'build/',
     '__pycache__/',
