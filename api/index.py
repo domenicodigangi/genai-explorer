@@ -95,19 +95,6 @@ def _load_data():
         _store["emb_ids"] = []
         _store["emb_matrix_norm"] = np.array([])
 
-    # Try ChromaDB (local dev)
-    try:
-        import chromadb
-        chroma_dir = DATA_DIR / "chroma_db"
-        if chroma_dir.exists():
-            client = chromadb.PersistentClient(path=str(chroma_dir))
-            _store["chroma"] = client.get_collection("genai_knowledge")
-            print("✅ ChromaDB loaded")
-        else:
-            _store["chroma"] = None
-    except Exception:
-        _store["chroma"] = None
-
     print(f"📦 Loaded {len(_store['chunks'])} chunks, "
           f"{len(_store['graph']['nodes'])} topic nodes, "
           f"{len(_store['emb_ids'])} embeddings")
@@ -145,37 +132,20 @@ def _check_rate_limit(ip: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def search_similar(query: str, top_k: int = 8) -> list[dict]:
-    """Search for similar chunks using either ChromaDB or numpy fallback."""
+    """Search for similar chunks via cosine similarity on pre-computed embeddings."""
     _load_data()
 
     client = get_openai()
     resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
     query_emb = np.array(resp.data[0].embedding, dtype=np.float32)
 
-    # Try ChromaDB first
-    if _store.get("chroma"):
-        results = _store["chroma"].query(
-            query_embeddings=[query_emb.tolist()],
-            n_results=top_k,
-        )
-        found = []
-        for i, doc_id in enumerate(results["ids"][0]):
-            chunk = _store["chunks"].get(doc_id, {})
-            found.append({
-                "id": doc_id,
-                "text": results["documents"][0][i],
-                "score": 1 - (results["distances"][0][i] if results["distances"] else 0),
-                **{k: v for k, v in chunk.items() if k not in ("id", "text")},
-            })
-        return found
-
-    # Numpy fallback
     if len(_store["emb_ids"]) == 0:
         return []
 
     query_norm = query_emb / (np.linalg.norm(query_emb) or 1)
     scores = _store["emb_matrix_norm"] @ query_norm
-    top_indices = np.argsort(scores)[::-1][:top_k]
+    top_indices = np.argpartition(-scores, top_k)[:top_k]
+    top_indices = top_indices[np.argsort(-scores[top_indices])]
 
     results = []
     for idx in top_indices:
@@ -235,7 +205,6 @@ def health():
         resp.update({
             "chunks": len(_store.get("chunks", {})),
             "topics": len(_store.get("graph", {}).get("nodes", [])),
-            "has_chroma": _store.get("chroma") is not None,
         })
     return resp
 
