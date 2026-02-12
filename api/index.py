@@ -24,7 +24,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -102,8 +102,14 @@ def _load_data():
 
 def get_openai() -> OpenAI:
     """Single OpenAI client for both chat and embeddings."""
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API key not configured. Set OPENAI_API_KEY in environment variables.",
+        )
     return OpenAI(
-        api_key=os.environ.get("OPENAI_API_KEY", ""),
+        api_key=api_key,
         timeout=httpx.Timeout(30.0, connect=5.0),
     )
 
@@ -136,7 +142,10 @@ def search_similar(query: str, top_k: int = 8) -> list[dict]:
     _load_data()
 
     client = get_openai()
-    resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
+    try:
+        resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
+    except OpenAIError:
+        raise HTTPException(status_code=502, detail="Embedding service temporarily unavailable")
     query_emb = np.array(resp.data[0].embedding, dtype=np.float32)
 
     if len(_store["emb_ids"]) == 0:
@@ -200,7 +209,12 @@ class ChatResponse(BaseModel):
 @app.get("/api/health")
 def health():
     _load_data()
-    resp: dict = {"status": "ok", "data_loaded": bool(_store.get("chunks"))}
+    has_key = bool((os.environ.get("OPENAI_API_KEY") or "").strip())
+    resp: dict = {
+        "status": "ok",
+        "data_loaded": bool(_store.get("chunks")),
+        "api_key_set": has_key,
+    }
     if os.environ.get("DEBUG_HEALTH"):
         resp.update({
             "chunks": len(_store.get("chunks", {})),
