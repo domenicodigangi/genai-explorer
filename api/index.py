@@ -266,62 +266,18 @@ class ChatResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
-def health(debug: str = Query("", alias="debug_secret")):
+def health():
     _load_data()
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    has_key = bool(api_key)
-    # Show masked prefix so we can verify the right key is deployed
-    key_preview = f"{api_key[:7]}...{api_key[-4:]}" if len(api_key) > 11 else "too_short"
+    has_key = bool((os.environ.get("OPENAI_API_KEY") or "").strip())
     resp: dict = {
         "status": "ok",
         "data_loaded": bool(_store.get("chunks")),
+        "chunks": len(_store.get("chunks", {})),
+        "topics": len(_store.get("graph", {}).get("nodes", [])),
+        "embeddings": len(_store.get("emb_ids", [])),
         "api_key_set": has_key,
-        "api_key_preview": key_preview if has_key else None,
-        "debug_secret_set": bool(os.environ.get("DEBUG_SECRET")),
     }
-    # Gate expensive OpenAI probe behind DEBUG_SECRET env var
-    expected_secret = os.environ.get("DEBUG_SECRET")
-    if expected_secret and debug and debug == expected_secret and has_key:
-        try:
-            client = get_openai()
-            emb = client.embeddings.create(input=["health check"], model=EMBEDDING_MODEL)
-            resp["openai_status"] = "ok"
-            resp["embedding_dim"] = len(emb.data[0].embedding)
-        except Exception as e:
-            resp["openai_status"] = "error"
-            resp["openai_error"] = str(e)[:300]
-        resp.update({
-            "chunks": len(_store.get("chunks", {})),
-            "topics": len(_store.get("graph", {}).get("nodes", [])),
-        })
     return resp
-
-
-@app.get("/api/debug-openai")
-def debug_openai():
-    """Test both chat and embeddings to isolate which endpoint fails."""
-    client = get_openai()
-    results: dict = {}
-
-    # Test 1: Chat completions
-    try:
-        chat_resp = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[{"role": "user", "content": "Say hi"}],
-            max_tokens=5,
-        )
-        results["chat"] = {"status": "ok", "model": CHAT_MODEL}
-    except OpenAIError as e:
-        results["chat"] = {"status": "error", "code": getattr(e, "status_code", None), "detail": str(e)[:300]}
-
-    # Test 2: Embeddings
-    try:
-        emb = client.embeddings.create(input=["test"], model=EMBEDDING_MODEL)
-        results["embeddings"] = {"status": "ok", "model": EMBEDDING_MODEL, "dims": len(emb.data[0].embedding)}
-    except OpenAIError as e:
-        results["embeddings"] = {"status": "error", "code": getattr(e, "status_code", None), "detail": str(e)[:300]}
-
-    return results
 
 
 @app.post("/api/chat", response_model=ChatResponse)
