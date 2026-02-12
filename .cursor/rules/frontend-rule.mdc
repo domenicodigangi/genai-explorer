@@ -1,0 +1,31 @@
+---
+description: Frontend development rules for GenAI Knowledge Explorer
+globs: ["frontend/**"]
+---
+
+# GenAI Knowledge Explorer — Frontend Rules
+
+## Design System
+- **Theme**: Dark cosmic/constellation — deep navy (#0a0e1a) background, glowing accents
+- **Primary accent**: Violet (#8b5cf6) for concepts and highlights
+- **Secondary accents**: Cyan (#06b6d4) for techniques, Emerald (#10b981) for tools, Orange (#f97316) for providers
+- **Fonts**: Instrument Serif (display), DM Sans (body), JetBrains Mono (code)
+
+## Architecture
+- **Next.js 14** with App Router
+- **Tailwind CSS** for styling, with CSS custom properties for the design system
+- **D3.js v7** for the force-directed graph and treemap visualizations
+- **TypeScript** throughout
+
+## Component Guidelines
+- Use `'use client'` directive for interactive components
+- Fetch data from `/api/*` endpoints (proxied to the FastAPI backend)
+- Handle loading, error, and empty states gracefully
+- Use CSS animations for smooth transitions (defined in globals.css)
+- Keep components self-contained with their own data fetching
+
+## Visualization Notes
+- D3 renders into `<svg>` elements using refs — do NOT use React for SVG DOM manipulation
+- Support zoom/pan for the graph view
+- Node sizes proportional to topic weight (number of references)
+- Color-code by category (concept/technique/tool/provider)
