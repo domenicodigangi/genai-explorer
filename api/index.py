@@ -19,7 +19,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,18 +99,26 @@ def _load_data():
           f"{len(_store['emb_ids'])} embeddings")
 
 
+_openai_client: OpenAI | None = None
+
+
 def get_openai() -> OpenAI:
-    """Single OpenAI client for both chat and embeddings."""
+    """Lazy-singleton OpenAI client — reuses connection pool across requests."""
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise HTTPException(
             status_code=503,
             detail="OpenAI API key not configured. Set OPENAI_API_KEY in environment variables.",
         )
-    return OpenAI(
+    _openai_client = OpenAI(
         api_key=api_key,
-        timeout=httpx.Timeout(30.0, connect=5.0),
+        timeout=30.0,
+        max_retries=3,
     )
+    return _openai_client
 
 
 # ---------------------------------------------------------------------------
