@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkGemoji from 'remark-gemoji';
@@ -38,12 +38,21 @@ const SUGGESTIONS = [
   'Which courses cover multimodal AI models?',
 ];
 
+const MAX_SESSION_MESSAGES = 50;
+
 export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [cooldown, setCooldown] = useState(false);
+  const cooldownRef = useRef<ReturnType<typeof setTimeout>>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Cleanup cooldown timer
+  useEffect(() => {
+    return () => { if (cooldownRef.current) clearTimeout(cooldownRef.current); };
+  }, []);
 
   // Handle initial query from explore mode
   useEffect(() => {
@@ -61,9 +70,24 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
     }
   }, [messages]);
 
+  const userMessageCount = useMemo(
+    () => messages.filter(m => m.role === 'user').length,
+    [messages],
+  );
+
   const sendMessage = useCallback(async (text?: string) => {
     const messageText = text || input.trim();
-    if (!messageText || isLoading) return;
+    if (!messageText || isLoading || cooldown) return;
+
+    // Session message limit
+    if (userMessageCount >= MAX_SESSION_MESSAGES) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'You\'ve reached the message limit for this session. Please reload the page to continue.',
+        isError: true,
+      }]);
+      return;
+    }
 
     const userMessage: Message = { role: 'user', content: messageText };
     setMessages(prev => [...prev, userMessage]);
@@ -78,7 +102,9 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
         body: JSON.stringify({ message: messageText, history }),
       });
 
-      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      if (!res.ok) {
+        throw new Error(res.status === 429 ? 'RATE_LIMITED' : `API error: ${res.status}`);
+      }
 
       const data = await res.json();
       const assistantMessage: Message = {
@@ -88,18 +114,23 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
       };
       setMessages(prev => [...prev, assistantMessage]);
     } catch (err) {
+      const isRateLimited = err instanceof Error && err.message === 'RATE_LIMITED';
       setMessages(prev => [
         ...prev,
         {
           role: 'assistant',
-          content: 'Sorry, I encountered an error connecting to the API. Please make sure the backend is running.',
+          content: isRateLimited
+            ? 'You\'re sending messages too quickly. Please wait a moment before trying again.'
+            : 'Sorry, I encountered an error connecting to the API. Please make sure the backend is running.',
           isError: true,
         },
       ]);
     } finally {
       setIsLoading(false);
+      setCooldown(true);
+      cooldownRef.current = setTimeout(() => setCooldown(false), 2000);
     }
-  }, [input, isLoading, messages]);
+  }, [input, isLoading, cooldown, messages, userMessageCount]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -309,7 +340,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
           />
           <button
             onClick={() => sendMessage()}
-            disabled={!input.trim() || isLoading}
+            disabled={!input.trim() || isLoading || cooldown}
             className="p-3 text-[var(--text-muted)] hover:text-violet-400 disabled:opacity-30 transition-colors"
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

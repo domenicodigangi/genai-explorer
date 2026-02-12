@@ -10,10 +10,12 @@ Endpoints:
 LLM: OpenAI gpt-4.1-mini (chat) + text-embedding-3-small (embeddings)
 """
 
+import hashlib
 import json
 import os
 import time
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -113,7 +115,7 @@ def get_openai() -> OpenAI:
             status_code=503,
             detail="OpenAI API key not configured. Set OPENAI_API_KEY in environment variables.",
         )
-    kwargs: dict = {"api_key": api_key, "timeout": 30.0, "max_retries": 3}
+    kwargs: dict = {"api_key": api_key, "timeout": 30.0, "max_retries": 1}
     project_id = (os.environ.get("OPENAI_PROJECT_ID") or "").strip()
     org_id = (os.environ.get("OPENAI_ORG_ID") or "").strip()
     if project_id:
@@ -128,35 +130,82 @@ def get_openai() -> OpenAI:
 # Rate limiting — simple in-memory sliding window (per IP)
 # ---------------------------------------------------------------------------
 
-_rate_limits: dict[str, list[float]] = defaultdict(list)
-RATE_LIMIT_WINDOW = 60       # seconds
-RATE_LIMIT_MAX = 10          # max chat requests per window per IP
+_rate_limits: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+RATE_LIMIT_WINDOW = 60             # seconds
+RATE_LIMIT_MAX_CHAT = 10           # max chat requests per window per IP
+RATE_LIMIT_MAX_SEARCH = 20         # max search requests per window per IP (embeddings are cheap)
 
 
-def _check_rate_limit(ip: str) -> bool:
+def _check_rate_limit(ip: str, endpoint: str = "chat", max_requests: int | None = None) -> bool:
     """Return True if request is allowed, False if rate limited."""
+    if max_requests is None:
+        max_requests = RATE_LIMIT_MAX_CHAT
     now = time.time()
-    _rate_limits[ip] = [t for t in _rate_limits[ip] if t > now - RATE_LIMIT_WINDOW]
-    if len(_rate_limits[ip]) >= RATE_LIMIT_MAX:
+    bucket = _rate_limits[endpoint]
+    bucket[ip] = [t for t in bucket[ip] if t > now - RATE_LIMIT_WINDOW]
+    if len(bucket[ip]) >= max_requests:
         return False
-    _rate_limits[ip].append(now)
+    bucket[ip].append(now)
     return True
+
+
+def _get_client_ip(request: Request) -> str:
+    return (request.headers.get("x-forwarded-for", "") or
+            (request.client.host if request.client else "unknown")).split(",")[0].strip()
+
+
+# ---------------------------------------------------------------------------
+# Chat response cache — avoid repeated expensive LLM calls
+# ---------------------------------------------------------------------------
+
+_chat_cache: dict[str, tuple[float, str, list[dict]]] = {}
+CHAT_CACHE_MAX = 128
+CHAT_CACHE_TTL = 3600  # 1 hour
+
+
+def _chat_cache_key(message: str, history: list) -> str:
+    """Deterministic hash of chat request (message + last 6 history entries)."""
+    history_str = "|".join(f"{m.role}:{m.content}" for m in history[-6:])
+    return hashlib.sha256(f"{message}||{history_str}".encode()).hexdigest()
+
+
+def _get_cached_chat(key: str) -> tuple[str, list[dict]] | None:
+    if key in _chat_cache:
+        ts, answer, sources = _chat_cache[key]
+        if time.time() - ts < CHAT_CACHE_TTL:
+            return answer, sources
+        del _chat_cache[key]
+    return None
+
+
+def _set_chat_cache(key: str, answer: str, sources: list[dict]):
+    if len(_chat_cache) >= CHAT_CACHE_MAX:
+        oldest_key = min(_chat_cache, key=lambda k: _chat_cache[k][0])
+        del _chat_cache[oldest_key]
+    _chat_cache[key] = (time.time(), answer, sources)
 
 
 # ---------------------------------------------------------------------------
 # Similarity search
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=256)
+def _get_embedding_cached(query: str) -> tuple[float, ...]:
+    """Cache embedding results for identical queries (~3MB for 256 entries)."""
+    client = get_openai()
+    resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
+    return tuple(resp.data[0].embedding)
+
+
 def search_similar(query: str, top_k: int = 8) -> list[dict]:
     """Search for similar chunks via cosine similarity on pre-computed embeddings."""
     _load_data()
 
-    client = get_openai()
     try:
-        resp = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
+        emb_tuple = _get_embedding_cached(query)
     except OpenAIError as e:
         raise HTTPException(status_code=502, detail=f"Embedding service error: {str(e)[:500]}")
-    query_emb = np.array(resp.data[0].embedding, dtype=np.float32)
+    query_emb = np.array(emb_tuple, dtype=np.float32)
 
     if len(_store["emb_ids"]) == 0:
         return []
@@ -250,38 +299,44 @@ def health(debug: str = Query("", alias="debug_secret")):
 
 @app.get("/api/debug-openai")
 def debug_openai():
-    """Raw HTTP test — bypasses OpenAI SDK to isolate SDK vs network issues."""
-    import urllib.request
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        return {"error": "no key"}
-    payload = json.dumps({"input": ["test"], "model": EMBEDDING_MODEL}).encode()
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/embeddings",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
+    """Test both chat and embeddings to isolate which endpoint fails."""
+    client = get_openai()
+    results: dict = {}
+
+    # Test 1: Chat completions
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read())
-            return {"status": "ok", "dims": len(body["data"][0]["embedding"])}
-    except urllib.error.HTTPError as e:
-        return {"status": "http_error", "code": e.code, "body": e.read().decode()[:500]}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)[:500]}
+        chat_resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "user", "content": "Say hi"}],
+            max_tokens=5,
+        )
+        results["chat"] = {"status": "ok", "model": CHAT_MODEL}
+    except OpenAIError as e:
+        results["chat"] = {"status": "error", "code": getattr(e, "status_code", None), "detail": str(e)[:300]}
+
+    # Test 2: Embeddings
+    try:
+        emb = client.embeddings.create(input=["test"], model=EMBEDDING_MODEL)
+        results["embeddings"] = {"status": "ok", "model": EMBEDDING_MODEL, "dims": len(emb.data[0].embedding)}
+    except OpenAIError as e:
+        results["embeddings"] = {"status": "error", "code": getattr(e, "status_code", None), "detail": str(e)[:300]}
+
+    return results
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, request: Request):
     """RAG-powered chat: retrieve relevant chunks, generate answer with citations."""
-    client_ip = (request.headers.get("x-forwarded-for", "") or
-                 (request.client.host if request.client else "unknown")).split(",")[0].strip()
-    if not _check_rate_limit(client_ip):
+    client_ip = _get_client_ip(request)
+    if not _check_rate_limit(client_ip, "chat", RATE_LIMIT_MAX_CHAT):
         raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait before sending more messages.")
     _load_data()
+
+    # 0. Check chat cache — avoid expensive LLM call for repeated questions
+    cache_key = _chat_cache_key(req.message, req.history)
+    cached = _get_cached_chat(cache_key)
+    if cached:
+        return ChatResponse(answer=cached[0], sources=cached[1])
 
     # 1. Retrieve relevant chunks
     results = search_similar(req.message, top_k=6)
@@ -361,12 +416,16 @@ User question: {req.message}"""
             "all_urls": r.get("all_urls", []),
         })
 
+    _set_chat_cache(cache_key, answer, sources)
     return ChatResponse(answer=answer, sources=sources)
 
 
 @app.get("/api/search")
-def search(q: str = Query(..., min_length=2), top_k: int = Query(10, ge=1, le=50)):
+def search(request: Request, q: str = Query(..., min_length=2), top_k: int = Query(10, ge=1, le=20)):
     """Semantic search across the knowledge base."""
+    client_ip = _get_client_ip(request)
+    if not _check_rate_limit(client_ip, "search", RATE_LIMIT_MAX_SEARCH):
+        raise HTTPException(status_code=429, detail="Search rate limit exceeded. Please wait before searching again.")
     results = search_similar(q, top_k=top_k)
     return {"query": q, "results": results}
 
