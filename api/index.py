@@ -222,6 +222,15 @@ def health():
         "data_loaded": bool(_store.get("chunks")),
         "api_key_set": has_key,
     }
+    if has_key:
+        try:
+            client = get_openai()
+            emb = client.embeddings.create(input=["health check"], model=EMBEDDING_MODEL)
+            resp["openai_status"] = "ok"
+            resp["embedding_dim"] = len(emb.data[0].embedding)
+        except Exception as e:
+            resp["openai_status"] = "error"
+            resp["openai_error"] = str(e)[:300]
     if os.environ.get("DEBUG_HEALTH"):
         resp.update({
             "chunks": len(_store.get("chunks", {})),
