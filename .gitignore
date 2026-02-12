@@ -27,6 +27,9 @@ frontend/out/
 # Vercel
 .vercel/
 
+# Screenshots (generated during development/testing)
+screenshots/
+
 # OS
 .DS_Store
 Thumbs.db
