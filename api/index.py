@@ -13,6 +13,9 @@ LLM: OpenAI gpt-4.1-mini (chat) + text-embedding-3-small (embeddings)
 import json
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 from typing import Optional
 
 import numpy as np

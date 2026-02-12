@@ -13,6 +13,9 @@ This script:
 import json
 import os
 import re
+
+from dotenv import load_dotenv
+load_dotenv()
 import subprocess
 import sys
 from pathlib import Path
@@ -516,6 +519,18 @@ def store_in_chromadb(chunks: list[Chunk], embeddings: list[list[float]]):
         name="genai_knowledge",
         metadata={"hnsw:space": "cosine"},
     )
+
+    # Deduplicate by ID (keep first occurrence)
+    seen_ids: set[str] = set()
+    unique_indices: list[int] = []
+    for idx, c in enumerate(chunks):
+        if c.id not in seen_ids:
+            seen_ids.add(c.id)
+            unique_indices.append(idx)
+    if len(unique_indices) < len(chunks):
+        print(f"  ⚠️  Removed {len(chunks) - len(unique_indices)} duplicate chunk IDs")
+        chunks = [chunks[i] for i in unique_indices]
+        embeddings = [embeddings[i] for i in unique_indices]
 
     # Add in batches (ChromaDB limit)
     batch = 100

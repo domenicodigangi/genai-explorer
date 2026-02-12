@@ -248,3 +248,19 @@ body::before {
   color: var(--text-primary);
   font-weight: 600;
 }
+
+/* ---- Markdown in Resource previews ---- */
+.prose-resource a {
+  color: var(--nebula);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose-resource strong {
+  font-weight: 600;
+}
+.prose-resource code {
+  background: rgba(139, 92, 246, 0.12);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}

@@ -1,6 +1,24 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkGemoji from 'remark-gemoji';
+import { nameToEmoji } from 'gemoji';
+
+/** Common non-standard shortcode aliases */
+const EMOJI_ALIASES: Record<string, string> = {
+  mortarboard: 'mortar_board',
+  notebook: 'notebook',
+};
+
+/** Replace :shortcode: with actual emoji in plain strings */
+function emojify(text: string): string {
+  return text.replace(/:([a-z0-9_+-]+):/g, (match, name) => {
+    const resolved = EMOJI_ALIASES[name] || name;
+    return nameToEmoji[resolved] ?? match;
+  });
+}
 
 interface TopicData {
   topic: {
@@ -20,6 +38,8 @@ interface TopicData {
     category: string;
     url: string;
     text_preview: string;
+    content_type: string;
+    all_urls: string[];
   }>;
 }
 
@@ -196,18 +216,27 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
                         rel="noopener noreferrer"
                         className="text-sm text-[var(--text-primary)] hover:text-violet-400 transition-colors font-medium leading-tight block"
                       >
-                        {resource.title}
+                        {emojify(resource.title)}
                       </a>
                     ) : (
                       <p className="text-sm text-[var(--text-primary)] font-medium leading-tight">
-                        {resource.title}
+                        {emojify(resource.title)}
                       </p>
                     )}
                     {resource.text_preview && (
-                      <p className="text-[11px] text-[var(--text-muted)] mt-1.5 leading-relaxed line-clamp-3">
-                        {resource.text_preview.slice(0, 200)}
-                        {resource.text_preview.length > 200 ? '…' : ''}
-                      </p>
+                      <div className="prose-resource text-[11px] text-[var(--text-muted)] mt-1.5 leading-relaxed line-clamp-3">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkGemoji]}
+                          components={{
+                            a: ({ href, children }) => (
+                              <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+                            ),
+                            p: ({ children }) => <span>{children} </span>,
+                          }}
+                        >
+                          {resource.text_preview}
+                        </ReactMarkdown>
+                      </div>
                     )}
                     {/* Action row: file path + paper link */}
                     <div className="flex items-center justify-between mt-2">
@@ -229,13 +258,32 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat }: Props
                           Read Paper
                         </a>
                       )}
-                      {/* Show additional links count */}
-                      {resource.all_urls && resource.all_urls.length > 1 && (
-                        <span className="text-[10px] text-[var(--text-muted)] ml-2">
-                          {resource.all_urls.length} links
-                        </span>
-                      )}
                     </div>
+                    {/* Additional links */}
+                    {resource.all_urls && resource.all_urls.length > 1 && (
+                      <div className="flex flex-wrap gap-1.5 mt-1.5">
+                        {resource.all_urls.filter(u => u !== resource.url).map((u, j) => {
+                          let label = u;
+                          try { label = new URL(u).hostname.replace('www.', ''); } catch {}
+                          return (
+                            <a
+                              key={j}
+                              href={u}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-500/10 text-[10px] text-violet-300 hover:bg-violet-500/20 transition-colors truncate max-w-[200px]"
+                            >
+                              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                                <polyline points="15 3 21 3 21 9"/>
+                                <line x1="10" y1="14" x2="21" y2="3"/>
+                              </svg>
+                              {label}
+                            </a>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

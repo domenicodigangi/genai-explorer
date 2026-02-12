@@ -1,6 +1,9 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkGemoji from 'remark-gemoji';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -168,9 +171,16 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
 
             {/* Content */}
             <div className="prose-chat text-sm text-[var(--text-primary)]">
-              {msg.content.split('\n').map((line, j) => (
-                <p key={j}>{line}</p>
-              ))}
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkGemoji]}
+                components={{
+                  a: ({ href, children }) => (
+                    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+                  ),
+                }}
+              >
+                {msg.content}
+              </ReactMarkdown>
             </div>
 
             {/* Sources */}
