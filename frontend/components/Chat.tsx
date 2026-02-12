@@ -29,15 +29,15 @@ interface Source {
 interface ChatProps {
   initialQuery: string;
   onQueryConsumed: () => void;
+  onExploreInGraph?: (topicId: string) => void;
+  onSwitchToExplore?: () => void;
 }
 
 const SUGGESTIONS = [
   'How does RAG work, and what retrieval strategies are compared in the resources?',
-  'What are the key approaches to evaluating LLM outputs — metrics, benchmarks, and best practices?',
-  'Explain LoRA and QLoRA — how do parameter-efficient fine-tuning methods work?',
   'What types of AI agents are described, and how do they use tools and planning?',
+  'Explain LoRA and QLoRA — how do parameter-efficient fine-tuning methods work?',
   'What are the main safety and alignment challenges for LLMs, and how does RLHF address them?',
-  'How do multimodal models like GPT-4V and Gemini combine vision and language capabilities?',
 ];
 
 const MAX_SESSION_MESSAGES = 50;
@@ -100,8 +100,14 @@ async function readSSEStream(
   }
 }
 
-export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
+export default function Chat({ initialQuery, onQueryConsumed, onExploreInGraph, onSwitchToExplore }: ChatProps) {
+  const [messages, setMessages] = useState<Message[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const saved = sessionStorage.getItem('chat-messages');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -116,6 +122,13 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
   useEffect(() => {
     return () => { if (cooldownRef.current) clearTimeout(cooldownRef.current); };
   }, []);
+
+  // Persist messages to sessionStorage
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('chat-messages', JSON.stringify(messages));
+    } catch { /* quota exceeded — ignore */ }
+  }, [messages]);
 
   // Handle initial query from explore mode
   useEffect(() => {
@@ -292,6 +305,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
     setCooldown(false);
     setExpandedSources(new Set());
     if (cooldownRef.current) clearTimeout(cooldownRef.current);
+    try { sessionStorage.removeItem('chat-messages'); } catch {}
     setTimeout(() => inputRef.current?.focus(), 100);
   }, []);
 
@@ -308,6 +322,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
       case 'resources': return 'text-violet-400';
       case 'interview_prep': return 'text-amber-400';
       case 'research_updates': return 'text-cyan-400';
+      case 'root': return 'text-slate-400';
       default: return 'text-slate-400';
     }
   };
@@ -318,6 +333,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
       case 'resources': return 'Resource';
       case 'interview_prep': return 'Interview';
       case 'research_updates': return 'Research';
+      case 'root': return 'Guide';
       default: return cat;
     }
   };
@@ -393,17 +409,38 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
               I can help you navigate 90+ courses, research papers, roadmaps, and interview prep materials
               from the awesome-generative-ai-guide collection.
             </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-lg">
               {SUGGESTIONS.map((s, i) => (
                 <button
                   key={i}
                   onClick={() => sendMessage(s)}
-                  className="text-left text-xs text-[var(--text-secondary)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] border border-[var(--border)] rounded-lg px-3 py-3 min-h-[44px] transition-all hover:border-violet-500/30"
+                  className="text-left text-sm text-[var(--text-secondary)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] border border-[var(--border)] rounded-lg px-4 py-3.5 min-h-[48px] transition-all hover:border-violet-500/30 leading-snug"
                 >
                   {s}
                 </button>
               ))}
             </div>
+
+            {/* Explore mode promotion */}
+            {onSwitchToExplore && (
+              <>
+                <div className="mt-6 flex items-center gap-3 text-xs text-[var(--text-muted)]">
+                  <span className="w-8 h-px bg-[var(--border)]" />
+                  <span>or</span>
+                  <span className="w-8 h-px bg-[var(--border)]" />
+                </div>
+                <button
+                  onClick={onSwitchToExplore}
+                  className="mt-3 flex items-center gap-2 text-xs text-cyan-300 hover:text-cyan-200 transition-colors"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>
+                  </svg>
+                  Explore the knowledge graph visually
+                </button>
+              </>
+            )}
           </div>
         )}
 
@@ -428,7 +465,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
               <div className="flex items-center gap-1 mt-3">
                 <button
                   onClick={() => setFeedback(msgIdx, 'up')}
-                  className={`p-1.5 rounded transition-colors ${
+                  className={`p-2.5 rounded-lg transition-colors ${
                     msg.feedback === 'up'
                       ? 'text-emerald-400 bg-emerald-500/15'
                       : 'text-[var(--text-muted)] hover:text-emerald-400 hover:bg-emerald-500/10'
@@ -441,7 +478,7 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                 </button>
                 <button
                   onClick={() => setFeedback(msgIdx, 'down')}
-                  className={`p-1.5 rounded transition-colors ${
+                  className={`p-2.5 rounded-lg transition-colors ${
                     msg.feedback === 'down'
                       ? 'text-rose-400 bg-rose-500/15'
                       : 'text-[var(--text-muted)] hover:text-rose-400 hover:bg-rose-500/10'
@@ -530,7 +567,11 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                                 +{source.all_urls.length - 1} links
                               </span>
                             )}
-                            <span className="text-xs text-[var(--text-muted)]">
+                            <span className={`text-xs tabular-nums ${
+                              source.score > 0.85 ? 'text-emerald-400' :
+                              source.score > 0.7 ? 'text-[var(--text-secondary)]' :
+                              'text-[var(--text-muted)]'
+                            }`}>
                               {(source.score * 100).toFixed(0)}%
                             </span>
                           </span>
@@ -546,6 +587,25 @@ export default function Chat({ initialQuery, onQueryConsumed }: ChatProps) {
                     );
                   })}
                 </div>
+
+                {/* Explore topic chips — bidirectional bridge */}
+                {onExploreInGraph && (() => {
+                  const allTopics = Array.from(new Set(msg.sources!.flatMap(s => s.topics || []))).slice(0, 5);
+                  return allTopics.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5 mt-3 pt-2 border-t border-[var(--border)]">
+                      <span className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider mr-1 self-center">Explore</span>
+                      {allTopics.map(topic => (
+                        <button
+                          key={topic}
+                          onClick={() => onExploreInGraph(topic.toLowerCase().replace(/\s+/g, '_'))}
+                          className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 transition-colors"
+                        >
+                          {topic}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null;
+                })()}
               </div>
             )}
           </div>

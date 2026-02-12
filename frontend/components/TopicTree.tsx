@@ -137,9 +137,18 @@ export default function TopicTree({ onTopicClick }: Props) {
         .data(treemapRoot.leaves())
         .join('g')
         .attr('class', 'leaf tree-node')
+        .attr('tabindex', '0')
+        .attr('role', 'button')
+        .attr('aria-label', d => `${d.data.name}, ${d.data.value || 0} references`)
         .style('cursor', 'pointer')
         .on('click', (event, d) => {
           if (d.data.id) onTopicClick(d.data.id);
+        })
+        .on('keydown', (event, d) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (d.data.id) onTopicClick(d.data.id);
+          }
         })
         .on('mouseenter', (event, d) => {
           setHoveredNode(d.data.name);
@@ -249,10 +258,15 @@ export default function TopicTree({ onTopicClick }: Props) {
       )}
       {error && (
         <div className="absolute inset-0 flex items-center justify-center">
-          <p className="text-sm text-red-400">{error}</p>
+          <div className="text-center max-w-sm animate-fade-in">
+            <p className="text-sm text-red-400 mb-2">{error}</p>
+            <p className="text-xs text-[var(--text-muted)]">
+              Make sure the API is running and data has been ingested.
+            </p>
+          </div>
         </div>
       )}
-      <svg ref={svgRef} className="w-full h-full" />
+      <svg ref={svgRef} className="w-full h-full" role="img" aria-label="Treemap showing GenAI topic categories and their relative sizes" />
 
       {/* Tooltip */}
       {hoveredNode && (

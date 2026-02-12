@@ -13,7 +13,7 @@
   --border-bright: #334155;
   --text-primary: #e2e8f0;
   --text-secondary: #94a3b8;
-  --text-muted: #7e8fa6;
+  --text-muted: #8e9db5;
   --nebula: #8b5cf6;
   --nebula-glow: rgba(139, 92, 246, 0.3);
   --aurora: #10b981;
@@ -293,8 +293,21 @@ body::before {
 /* ---- Mobile Responsive ---- */
 @media (max-width: 640px) {
   .detail-panel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
     width: 100% !important;
+    max-height: 70vh;
     border-left: none;
     border-top: 1px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    z-index: 50;
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.4);
   }
+  .detail-backdrop {
+    display: block;
+  }
+}
+.detail-backdrop {
+  display: none;
 }

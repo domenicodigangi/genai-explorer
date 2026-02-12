@@ -13,7 +13,9 @@ export default function Home() {
   const [tab, setTab] = useState<Tab>('explore');
   const [exploreView, setExploreView] = useState<ExploreView>('graph');
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
+  const [selectedTopicLabel, setSelectedTopicLabel] = useState<string>('');
   const [searchFromExplore, setSearchFromExplore] = useState<string>('');
+  const [exploreSearch, setExploreSearch] = useState<string>('');
 
   const handleTopicClick = useCallback((topicId: string) => {
     setSelectedTopic(topicId);
@@ -22,6 +24,12 @@ export default function Home() {
   const handleExploreInChat = useCallback((topicLabel: string) => {
     setSearchFromExplore(topicLabel);
     setTab('chat');
+  }, []);
+
+  const handleExploreInGraph = useCallback((topicId: string) => {
+    setSelectedTopic(topicId);
+    setExploreView('graph');
+    setTab('explore');
   }, []);
 
   // Escape key closes detail panel
@@ -37,16 +45,16 @@ export default function Home() {
     <div className="h-screen flex flex-col overflow-hidden">
       {/* ---- Header ---- */}
       <header className="flex-shrink-0 border-b border-[var(--border)] bg-[var(--abyss)]">
-        <div className="flex items-center justify-between flex-wrap gap-3 px-6 py-3">
+        <div className="flex items-center gap-6 px-6 py-3">
           {/* Logo */}
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center flex-shrink-0">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3"/>
                 <path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8l2.8-2.8M17 7l2.8-2.8"/>
               </svg>
             </div>
-            <div>
+            <div className="hidden sm:block">
               <h1 className="font-display text-xl text-[var(--text-primary)] leading-none">
                 GenAI Knowledge Explorer
               </h1>
@@ -56,7 +64,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Tab switcher */}
+          {/* Tab switcher — immediately after logo */}
           <div className="flex items-center gap-1 bg-[var(--midnight)] rounded-lg p-1">
             <button
               onClick={() => setTab('chat')}
@@ -87,7 +95,10 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Source link */}
+          {/* Spacer */}
+          <div className="flex-1" />
+
+          {/* Source link — far right */}
           <a
             href="https://github.com/aishwaryanr/awesome-generative-ai-guide"
             target="_blank"
@@ -97,7 +108,7 @@ export default function Home() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
             </svg>
-            Source Repo
+            <span className="hidden sm:inline">Source Repo</span>
           </a>
         </div>
       </header>
@@ -106,7 +117,12 @@ export default function Home() {
       <main className="flex-1 overflow-hidden relative">
         {/* Chat Mode */}
         {tab === 'chat' && (
-          <Chat initialQuery={searchFromExplore} onQueryConsumed={() => setSearchFromExplore('')} />
+          <Chat
+            initialQuery={searchFromExplore}
+            onQueryConsumed={() => setSearchFromExplore('')}
+            onExploreInGraph={handleExploreInGraph}
+            onSwitchToExplore={() => setTab('explore')}
+          />
         )}
 
         {/* Explore Mode */}
@@ -115,10 +131,10 @@ export default function Home() {
             {/* Visualization area */}
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Sub-tab bar */}
-              <div className="flex items-center gap-4 px-6 py-2 border-b border-[var(--border)] bg-[var(--abyss)]">
+              <div className="flex items-center gap-3 px-6 py-2 border-b border-[var(--border)] bg-[var(--abyss)]">
                 <button
                   onClick={() => setExploreView('graph')}
-                  className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium transition-all ${
                     exploreView === 'graph'
                       ? 'bg-violet-500/15 text-violet-300'
                       : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
@@ -132,7 +148,7 @@ export default function Home() {
                 </button>
                 <button
                   onClick={() => setExploreView('tree')}
-                  className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium transition-all ${
                     exploreView === 'tree'
                       ? 'bg-cyan-500/15 text-cyan-300'
                       : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
@@ -144,8 +160,50 @@ export default function Home() {
                   </svg>
                   Topic Treemap
                 </button>
+
+                {/* Selected topic breadcrumb */}
+                {selectedTopicLabel && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[var(--text-muted)]">/</span>
+                    <button
+                      onClick={() => setSelectedTopic(null)}
+                      className="text-xs text-violet-300 bg-violet-500/10 px-2.5 py-1 rounded-full hover:bg-violet-500/20 transition-colors flex items-center gap-1.5"
+                    >
+                      {selectedTopicLabel}
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                    </button>
+                  </div>
+                )}
+
                 <div className="flex-1" />
-                <span className="text-xs text-[var(--text-muted)] tracking-wider uppercase">
+
+                {/* Topic search */}
+                <div className="relative">
+                  <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                  </svg>
+                  <input
+                    type="text"
+                    placeholder="Find a topic..."
+                    value={exploreSearch}
+                    onChange={(e) => setExploreSearch(e.target.value)}
+                    className="bg-[var(--midnight)] border border-[var(--border)] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] w-40 focus:outline-none focus:border-violet-500/50 transition-colors"
+                  />
+                  {exploreSearch && (
+                    <button
+                      onClick={() => setExploreSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                    </button>
+                  )}
+                </div>
+
+                <span className="hidden sm:inline text-xs text-[var(--text-muted)] tracking-wider uppercase">
                   Click a topic to explore
                 </span>
               </div>
@@ -153,7 +211,7 @@ export default function Home() {
               {/* Graph or Tree */}
               <div className="flex-1 overflow-hidden">
                 {exploreView === 'graph' && (
-                  <TopicGraph onTopicClick={handleTopicClick} selectedTopic={selectedTopic} />
+                  <TopicGraph onTopicClick={handleTopicClick} selectedTopic={selectedTopic} searchQuery={exploreSearch} />
                 )}
                 {exploreView === 'tree' && (
                   <TopicTree onTopicClick={handleTopicClick} />
@@ -161,14 +219,21 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Detail panel */}
+            {/* Detail panel with mobile backdrop */}
             {selectedTopic && (
-              <TopicDetail
-                topicId={selectedTopic}
-                onClose={() => setSelectedTopic(null)}
-                onExploreInChat={handleExploreInChat}
-                onTopicSelect={handleTopicClick}
-              />
+              <>
+                <div
+                  className="detail-backdrop fixed inset-0 bg-black/40 z-40"
+                  onClick={() => setSelectedTopic(null)}
+                />
+                <TopicDetail
+                  topicId={selectedTopic}
+                  onClose={() => { setSelectedTopic(null); setSelectedTopicLabel(''); }}
+                  onExploreInChat={handleExploreInChat}
+                  onTopicSelect={handleTopicClick}
+                  onLabelResolved={setSelectedTopicLabel}
+                />
+              </>
             )}
           </div>
         )}

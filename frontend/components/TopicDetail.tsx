@@ -49,6 +49,7 @@ interface Props {
   onClose: () => void;
   onExploreInChat: (topicLabel: string) => void;
   onTopicSelect: (topicId: string) => void;
+  onLabelResolved?: (label: string) => void;
 }
 
 const CATEGORY_BADGES: Record<string, { bg: string; text: string; label: string }> = {
@@ -59,6 +60,7 @@ const CATEGORY_BADGES: Record<string, { bg: string; text: string; label: string 
 };
 
 const FILE_CATEGORY_COLORS: Record<string, string> = {
+  root: 'text-slate-400',
   free_courses: 'text-emerald-400',
   resources: 'text-violet-400',
   interview_prep: 'text-amber-400',
@@ -66,13 +68,14 @@ const FILE_CATEGORY_COLORS: Record<string, string> = {
 };
 
 const FILE_CATEGORY_LABELS: Record<string, string> = {
+  root: 'Guide',
   free_courses: 'Course',
   resources: 'Resource',
   interview_prep: 'Interview Prep',
   research_updates: 'Research',
 };
 
-export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopicSelect }: Props) {
+export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopicSelect, onLabelResolved }: Props) {
   const [data, setData] = useState<TopicData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -89,6 +92,9 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopic
         if (!cancelled) {
           setData(d);
           setLoading(false);
+          if (d?.topic?.label && onLabelResolved) {
+            onLabelResolved(d.topic.label);
+          }
         }
       })
       .catch(() => {
@@ -128,13 +134,21 @@ export default function TopicDetail({ topicId, onClose, onExploreInChat, onTopic
                 </div>
               </>
             ) : (
-              <p className="text-sm text-[var(--text-muted)]">Topic not found</p>
+              <div>
+                <p className="text-sm text-[var(--text-muted)] mb-2">Could not load details for this topic.</p>
+                <button
+                  onClick={() => { setLoading(true); setData(null); }}
+                  className="text-xs text-violet-300 hover:text-violet-200 transition-colors"
+                >
+                  Try again
+                </button>
+              </div>
             )}
           </div>
           <button
             onClick={onClose}
             aria-label="Close detail panel"
-            className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+            className="p-2.5 -mr-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--midnight)] rounded-lg transition-colors"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>

@@ -29,6 +29,7 @@ interface GraphData {
 interface Props {
   onTopicClick: (topicId: string) => void;
   selectedTopic: string | null;
+  searchQuery?: string;
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -61,7 +62,7 @@ const LABEL_WEIGHT_FRACTION = 0.15;
 
 const ONBOARDING_KEY = 'genai-graph-onboarding-dismissed';
 
-export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
+export default function TopicGraph({ onTopicClick, selectedTopic, searchQuery }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
@@ -373,6 +374,50 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
     }
   }, [selectedTopic]);
 
+  // Search/filter highlighting
+  useEffect(() => {
+    if (!svgRef.current || !graphDataRef.current) return;
+    const svg = d3.select(svgRef.current);
+    const query = (searchQuery || '').toLowerCase().trim();
+
+    if (!query) {
+      // Reset all nodes to default
+      svg.selectAll('.graph-node circle').attr('fill-opacity', 0.7);
+      svg.selectAll('.graph-node text').style('opacity', (d: any) => {
+        const maxWeight = d3.max(graphDataRef.current!.nodes, n => n.weight) || 1;
+        return d.weight >= maxWeight * LABEL_WEIGHT_FRACTION ? 1 : 0;
+      });
+      return;
+    }
+
+    const matchingIds = new Set(
+      graphDataRef.current.nodes
+        .filter(n => n.label.toLowerCase().includes(query))
+        .map(n => n.id)
+    );
+
+    svg.selectAll('.graph-node circle')
+      .attr('fill-opacity', (d: any) => matchingIds.has(d.id) ? 0.95 : 0.1);
+    svg.selectAll('.graph-node text')
+      .style('opacity', (d: any) => matchingIds.has(d.id) ? 1 : 0.05);
+
+    // Auto-zoom to first match
+    if (matchingIds.size > 0 && zoomRef.current && containerRef.current) {
+      const firstMatch = graphDataRef.current.nodes.find(n => matchingIds.has(n.id));
+      if (firstMatch && firstMatch.x != null && firstMatch.y != null) {
+        const width = containerRef.current.clientWidth;
+        const height = containerRef.current.clientHeight;
+        (svg.transition().duration(400) as any).call(
+          zoomRef.current.transform,
+          d3.zoomIdentity
+            .translate(width / 2, height / 2)
+            .scale(1.5)
+            .translate(-firstMatch.x, -firstMatch.y)
+        );
+      }
+    }
+  }, [searchQuery]);
+
   return (
     <div ref={containerRef} className="w-full h-full graph-container relative bg-[var(--midnight)]">
       {loading && (
@@ -404,7 +449,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 animate-fade-in">
           <div className="flex items-center gap-3 bg-[var(--abyss)]/90 backdrop-blur-sm rounded-lg px-4 py-2.5 border border-violet-500/30 shadow-lg">
             <span className="text-xs text-[var(--text-secondary)]">
-              Scroll to zoom, drag to pan, click a node to explore
+              Scroll to zoom · Drag to pan · Click a node to explore · Tab through nodes · Esc to close panel
             </span>
             <button
               onClick={() => {
@@ -423,7 +468,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
       {/* Controls: Legend + Edge threshold slider */}
       {!loading && !error && (
         <>
-          {/* Legend */}
+          {/* Legend + help button */}
           <div className="absolute bottom-4 left-4 flex items-center gap-4 bg-[var(--abyss)]/80 backdrop-blur-sm rounded-lg px-4 py-2 border border-[var(--border)]">
             {Object.entries(CATEGORY_COLORS).map(([cat, color]) => (
               <div key={cat} className="flex items-center gap-1.5">
@@ -431,11 +476,23 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
                 <span className="text-xs text-[var(--text-muted)] capitalize">{cat}</span>
               </div>
             ))}
+            <button
+              onClick={() => setShowOnboarding(true)}
+              className="w-6 h-6 rounded-full bg-[var(--surface)] border border-[var(--border)] text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors ml-1"
+              aria-label="Show graph controls help"
+            >
+              ?
+            </button>
           </div>
 
           {/* Edge threshold slider */}
           <div className="absolute bottom-4 right-4 flex items-center gap-3 bg-[var(--abyss)]/80 backdrop-blur-sm rounded-lg px-4 py-2 border border-[var(--border)]">
-            <span className="text-xs text-[var(--text-muted)] whitespace-nowrap">Connections</span>
+            <div className="flex flex-col items-end">
+              <span className="text-xs text-[var(--text-muted)] whitespace-nowrap">Filter: min. strength</span>
+              <span className="text-[10px] text-[var(--text-muted)]">
+                {edgeThreshold <= MIN_THRESHOLD ? 'All connections' : `Strong (>=${edgeThreshold})`}
+              </span>
+            </div>
             <input
               type="range"
               min={MIN_THRESHOLD}
@@ -444,7 +501,7 @@ export default function TopicGraph({ onTopicClick, selectedTopic }: Props) {
               onChange={(e) => setEdgeThreshold(Number(e.target.value))}
               className="w-20 h-1 accent-violet-500 cursor-pointer"
             />
-            <span className="text-xs text-[var(--text-secondary)] tabular-nums w-6 text-right">
+            <span className="text-xs text-[var(--text-secondary)] tabular-nums w-8 text-right">
               {visibleEdgeCount}
             </span>
           </div>

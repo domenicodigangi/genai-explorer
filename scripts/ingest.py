@@ -662,14 +662,37 @@ def get_openai_client() -> OpenAI:
     return OpenAI(api_key=api_key)
 
 
+MAX_BATCH_TOKENS = 7500  # stay safely under the 8192 per-request limit
+
+
 def generate_embeddings(client: OpenAI, texts: list[str]) -> list[list[float]]:
-    """Generate embeddings in batches."""
+    """Generate embeddings in token-aware batches."""
     all_embeddings = []
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i:i + BATCH_SIZE]
-        print(f"  ⚡ Embedding batch {i // BATCH_SIZE + 1}/{(len(texts) - 1) // BATCH_SIZE + 1}")
+    batch: list[str] = []
+    batch_tokens = 0
+    batch_num = 0
+    total_batches_est = max(1, sum(_count_tokens(t) for t in texts) // MAX_BATCH_TOKENS)
+
+    for text in texts:
+        text_tokens = _count_tokens(text)
+        # If adding this text would exceed the budget, flush current batch
+        if batch and (batch_tokens + text_tokens > MAX_BATCH_TOKENS or len(batch) >= BATCH_SIZE):
+            batch_num += 1
+            print(f"  ⚡ Embedding batch {batch_num}/~{total_batches_est} ({len(batch)} texts, {batch_tokens} tokens)")
+            response = client.embeddings.create(input=batch, model=EMBEDDING_MODEL)
+            all_embeddings.extend([e.embedding for e in response.data])
+            batch = []
+            batch_tokens = 0
+        batch.append(text)
+        batch_tokens += text_tokens
+
+    # Flush remaining
+    if batch:
+        batch_num += 1
+        print(f"  ⚡ Embedding batch {batch_num}/~{total_batches_est} ({len(batch)} texts, {batch_tokens} tokens)")
         response = client.embeddings.create(input=batch, model=EMBEDDING_MODEL)
         all_embeddings.extend([e.embedding for e in response.data])
+
     return all_embeddings
 
 
