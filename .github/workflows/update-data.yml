@@ -91,7 +91,7 @@ jobs:
       - name: Verify output files
         if: steps.check_changes.outputs.changed == 'true'
         run: |
-          for file in data/chunks.json data/topic_graph.json data/ingestion_meta.json; do
+          for file in data/chunks.json data/topic_graph.json data/embeddings.json data/ingestion_meta.json; do
             if [ ! -s "$file" ]; then
               echo "::error::Output file $file is missing or empty!"
               exit 1
@@ -134,7 +134,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/chunks.json data/topic_graph.json data/ingestion_meta.json
+          git add data/chunks.json data/topic_graph.json data/embeddings.json data/ingestion_meta.json
 
           UPSTREAM_SHA="${{ steps.check_changes.outputs.upstream_sha }}"
           CHUNK_COUNT=$(python3 -c "import json; print(json.load(open('data/ingestion_meta.json'))['chunk_count'])")
